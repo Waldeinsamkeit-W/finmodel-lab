@@ -1,0 +1,119 @@
+/* ============================================================================
+ * modeltypes.js —— 模型类型（训练课程的一级分类）
+ * 每个类型下按 简单 / 中级 / 复杂 三档组织训练。
+ * ==========================================================================*/
+(function () {
+  'use strict';
+  const DB = window.DB;
+  DB.modelTypes = [];
+  const add = function (x) { DB.modelTypes.push(x); return x; };
+
+  add({
+    id: 'stmt', name: '财报拆解与比率分析', en: 'Statement Analysis', icon: '▤', color: '#3b6df0',
+    tagline: '把一张报表拆开，算清每一层利润率与效率指标',
+    desc: '所有模型的地基。学会读懂利润表、资产负债表、现金流量表的结构，' +
+      '把总量拆成率与量，再用杜邦、桥式分解等方法找出变化的真实来源。',
+    skills: ['利润率分层', '杜邦分解', '桥式归因（bridge）', '单位经济', '口径统一']
+  });
+
+  add({
+    id: 'three', name: '三表联动模型', en: '3-Statement Model', icon: '⊞', color: '#0d7d6c',
+    tagline: '从真实三张报表出发，做到资产 = 负债 + 权益',
+    desc: '财务建模的核心技能。以公司披露的历史三张报表为起点，' +
+      '先做勾稽校验（桥），再提取驱动指标，然后预测利润表、推导资产负债表、' +
+      '用间接法还原现金流，最后把期末现金送回资产负债表完成配平。',
+    skills: ['三表勾稽校验', '周转天数驱动营运资本', '固定资产与权益滚动', '间接法现金流', '配平（balance check）']
+  });
+
+  add({
+    id: 'dcf', name: 'DCF 估值', en: 'Discounted Cash Flow', icon: '◈', color: '#7c4dff',
+    tagline: '自由现金流、WACC、终值，一路推到每股价值',
+    desc: '把预测出来的自由现金流按资金成本折现。核心难点不在算术，' +
+      '而在于理解终值通常占企业价值的六成以上——所以敏感性分析不是可选项。',
+    skills: ['UFCF 构建', 'CAPM 与 WACC', '永续增长法终值', 'EV → 股权价值 → 每股', '二维敏感性表']
+  });
+
+  add({
+    id: 'comps', name: '可比公司 / 先例交易', en: 'Comps & Precedents', icon: '⋈', color: '#c2513a',
+    tagline: '相对估值：倍数怎么选、怎么调、怎么用',
+    desc: '用同行的估值倍数给目标定价。关键在口径统一——' +
+      '分子分母必须匹配（EV 对 EBITDA，市值对净利润），并对增速与利润率差异做调整。',
+    skills: ['EV/EBITDA 与 P/E 的匹配', '口径调平', '中位数 vs 均值', 'PEG 与其适用边界', '控制权溢价']
+  });
+
+  add({
+    id: 'forecast', name: '行业驱动盈利预测', en: 'Driver-based Forecast', icon: '↗', color: '#1a8c6d',
+    tagline: '收入 = 量 × 价，把预测落到可验证的业务驱动上',
+    desc: '不给总收入拍增长率，而是拆到销量、单价、产能利用率、分部结构这些' +
+      '能被行业数据验证的驱动因子上，再逐层加总。',
+    skills: ['量价拆解', '分部加总（build-up）', '产能与利用率', '假设与计算分离', '增长贡献度分解']
+  });
+
+  add({
+    id: 'lbo', name: 'LBO 杠杆收购', en: 'Leveraged Buyout', icon: '◆', color: '#a0762c',
+    tagline: '来源与用途、债务表、退出回报与归因',
+    desc: '私募股权的核心模型。用债务放大股权回报，靠经营改善、倍数扩张、' +
+      '债务偿还三条路径创造价值——学会把回报拆开，才知道钱是怎么赚到的。',
+    skills: ['Sources & Uses', '现金扫还与债务表', 'MOIC / IRR', '回报三分解', '退出倍数敏感性']
+  });
+
+  add({
+    id: 'ma', name: 'M&A 并购模型', en: 'Merger Model', icon: '⇉', color: '#c0344a',
+    tagline: '增厚 / 摊薄、换股比例、备考报表',
+    desc: '判断一笔交易对收购方每股收益是好是坏。现金收购看放弃的利息收入，' +
+      '换股收购看双方市盈率的高低——这两条经验法则能解释绝大多数结论。',
+    skills: ['备考净利润搭建', 'Accretion / Dilution', '换股比例与发行股数', '盈亏平衡协同', '价格桥（EV ↔ 股权价值）']
+  });
+
+  add({
+    id: 'sotp', name: '分部估值 SOTP', en: 'Sum of the Parts', icon: '◫', color: '#8248c9',
+    tagline: '业务分开定价，再加总回来',
+    desc: '当一家公司的几块业务属性完全不同（增速、利润率、风险都不一样），' +
+      '用一个统一倍数会严重失真。SOTP 把它们拆开分别估值，再扣掉净负债与控股折价。',
+    skills: ['分部利润还原', '分部倍数选取', '未上市股权与投资资产', '控股折价', '加总校验']
+  });
+
+  add({
+    id: 'bank', name: '金融机构模型', en: 'Financial Institutions', icon: '⛁', color: '#b03a2e',
+    tagline: '银行三表逻辑完全不同：规模 × 息差、拨备、PB–ROE',
+    desc: '银行没有营业成本和毛利率，资产负债表本身就是产品。' +
+      '收入来自生息资产规模乘净息差，利润被拨备调节，估值用 PB–ROE 而不是 DCF。',
+    skills: ['规模—价格分解', '净息差 NIM', '拨备与信用成本', '成本收入比', 'PB–ROE 框架']
+  });
+
+  add({
+    id: 'equity', name: '股权结构与融资', en: 'Cap Table & Financing', icon: '◍', color: '#2b8fa8',
+    tagline: '投前投后、稀释、各轮回报',
+    desc: '一级市场最基础的一张表。所有条款谈判最后都要落到"谁占多少股"，' +
+      '以及退出时每一方能分到多少。',
+    skills: ['投前 / 投后估值', '每股价格与发行股数', '逐轮稀释', 'MOIC 与 IRR', '期权池与优先权（进阶）']
+  });
+
+  /* ------------------------------------------------------------------
+   * 把已有模型挂到类型上
+   * ---------------------------------------------------------------- */
+  const MAP = {
+    'aapl-income': 'stmt',
+    'tsla-unit': 'stmt',
+    'moutai-mix': 'stmt',
+    'aapl-dupont': 'stmt',
+    'catl-bridge': 'stmt',
+    'nvda-oplev': 'stmt',
+    'hengrui-rd': 'stmt',
+    'yili-vs-moutai': 'comps',
+    'tcent-seg': 'forecast',
+    'cmb-nim': 'bank',
+    'byd-3s': 'three',
+    'aapl-dcf': 'dcf',
+    'vc-captable': 'equity',
+    'belle-lbo-basic': 'lbo',
+    'belle-lbo-full': 'lbo',
+    'msft-atvi': 'ma',
+    'mindray-huitai': 'ma',
+    'cssc-merger': 'ma'
+  };
+
+  DB.applyTypes = function () {
+    DB.models.forEach(function (m) { if (!m.type && MAP[m.id]) m.type = MAP[m.id]; });
+  };
+})();

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FinModel Lab · 财务模型实训平台</title>
+  <meta name="description" content="一级市场与二级市场财务模型实训：真实财报数据、可写公式的单元格、分难度分行业的建模练习。">
+  <link rel="stylesheet" href="assets/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+</head>
+<body>
+  <div id="app"><div class="empty"><div class="big">📊</div>正在加载模型库…</div></div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- 引擎与存储 -->
+  <script src="assets/engine.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/diagnose.js"></script>
+  <script src="assets/grid.js"></script>
+  <script src="assets/save.js"></script>
+  <script src="assets/xlsx.js"></script>
+
+  <!-- 数据层 -->
+  <script src="data/_schema.js"></script>
+  <script src="data/modeltypes.js"></script>
+  <script src="data/industries.js"></script>
+  <script src="data/industries2.js"></script>
+  <script src="data/companies.js"></script>
+  <script src="data/models-secondary.js"></script>
+  <script src="data/models-secondary2.js"></script>
+  <script src="data/models-primary.js"></script>
+  <script src="data/case-aapl-3s.js"></script>
+  <script src="data/case-aapl-dcf.js"></script>
+  <script src="data/case-moutai-3s.js"></script>
+  <script src="data/case-inovance-3s.js"></script>
+  <script src="data/case-inovance-sotp.js"></script>
+  <script src="data/cases-more.js"></script>
+  <script src="data/gaps-01-inovance.js"></script>
+  <script src="data/gaps-02-dcf.js"></script>
+  <script src="data/gaps-03-forecast.js"></script>
+  <script src="data/gaps-04-deal.js"></script>
+  <script src="data/gaps-05-bank.js"></script>
+  <script src="data/gaps-06-equity.js"></script>
+  <script src="data/gaps-07-comps-sotp.js"></script>
+  <script src="data/path.js"></script>
+
+  <!-- 界面 -->
+  <script src="assets/ui.js"></script>
+</body>
+</html>
