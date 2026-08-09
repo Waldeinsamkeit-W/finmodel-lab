@@ -154,6 +154,7 @@
       case 'browse': return shell(viewBrowse(r.arg));
       case 'progress': return shell(viewProgress());
       case 'about': return shell(viewAbout());
+      case 'board': return shell(viewBoard());
       default: return shell(viewHome());
     }
   }
@@ -192,14 +193,163 @@
         '<div class="sidebar-foot">' +
           '<div class="progress-line" style="margin-bottom:8px"><span>完成 ' + sum.completed + '/' + total + '</span></div>' +
           '<div class="bar"><i style="width:' + (total ? Math.round(sum.completed / total * 100) : 0) + '%"></i></div>' +
-          '<button class="nav-item" id="themeBtn" style="margin-top:12px"><span class="ico">◐</span>切换深浅色</button>' +
+          accountBlock(r) +
+          '<button class="nav-item" id="themeBtn" style="margin-top:6px"><span class="ico">◐</span>切换深浅色</button>' +
         '</div>' +
       '</aside>' +
       '<main class="main"><div class="container">' + contentHTML + '</div></main>';
 
     const tb = document.getElementById('themeBtn');
     if (tb) tb.onclick = toggleTheme;
+    bindAccount();
     bindCards();
+  }
+
+  /* =========================================================================
+   * 账号（没配 config.js 时整块不出现，站点行为和以前完全一样）
+   * =======================================================================*/
+  function accountBlock(r) {
+    if (!window.Auth || !Auth.enabled()) return '';
+    const u = Auth.user(), p = Auth.profile();
+    if (!u) {
+      return '<button class="nav-item" id="btnLogin" style="margin-top:12px">' +
+        '<span class="ico">◌</span>登录 / 注册</button>' +
+        '<div style="font-size:11px;color:var(--ink-3);padding:2px 10px 0;line-height:1.5">不登录也能练，进度存在这台设备上</div>';
+    }
+    const name = (p && p.nickname) || (u.email || '').split('@')[0];
+    return '<div style="margin-top:12px">' +
+      (Auth.isAdmin() ? '<a class="nav-item' + (r.name === 'board' ? ' active' : '') + '" href="#/board"><span class="ico">▩</span>班级看板</a>' : '') +
+      '<div class="nav-item" style="cursor:default"><span class="ico">●</span>' +
+        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(name) + '</span>' +
+        '<button class="btn ghost sm" id="btnLogout" style="margin-left:auto;padding:2px 6px">退出</button>' +
+      '</div>' +
+      '<div id="syncHint" style="font-size:11px;color:var(--ink-3);padding:0 10px;line-height:1.5">进度已同步到云端</div>' +
+    '</div>';
+  }
+
+  function bindAccount() {
+    const a = document.getElementById('btnLogin');
+    if (a) a.onclick = showAuthModal;
+    const b = document.getElementById('btnLogout');
+    if (b) b.onclick = function () {
+      if (!confirm('退出登录？本地进度会保留在这台设备上。')) return;
+      Auth.signOut().then(function () { toast('已退出'); render(); });
+    };
+  }
+
+  function showAuthModal(mode) {
+    mode = mode === 'signup' ? 'signup' : 'login';
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-mask';
+    function html() {
+      const signup = mode === 'signup';
+      return '<div class="modal" style="max-width:400px">' +
+        '<div class="mh"><h2 style="margin-bottom:2px">' + (signup ? '注册' : '登录') + '</h2>' +
+          '<div style="font-size:12.5px;color:var(--ink-3)">登录后进度会同步到云端，换设备也能接着练</div></div>' +
+        '<div class="mb">' +
+          (signup ? '<label style="display:block;font-size:12px;color:var(--ink-2);margin-bottom:4px">昵称</label>' +
+            '<input id="auNick" class="fx-input" style="width:100%;border:1px solid var(--border-strong);border-radius:8px;margin-bottom:12px;padding:8px 10px;font-family:var(--sans)" placeholder="别人在看板上看到的名字" maxlength="24">' : '') +
+          '<label style="display:block;font-size:12px;color:var(--ink-2);margin-bottom:4px">邮箱</label>' +
+          '<input id="auMail" type="email" autocomplete="username" class="fx-input" style="width:100%;border:1px solid var(--border-strong);border-radius:8px;margin-bottom:12px;padding:8px 10px;font-family:var(--sans)">' +
+          '<label style="display:block;font-size:12px;color:var(--ink-2);margin-bottom:4px">密码' + (signup ? '（至少 6 位）' : '') + '</label>' +
+          '<input id="auPass" type="password" autocomplete="' + (signup ? 'new-password' : 'current-password') + '" class="fx-input" style="width:100%;border:1px solid var(--border-strong);border-radius:8px;padding:8px 10px;font-family:var(--sans)">' +
+          '<div id="auMsg" style="font-size:12.5px;color:var(--err);margin-top:10px;min-height:18px;line-height:1.5"></div>' +
+          '<div style="font-size:11.5px;color:var(--ink-3);margin-top:8px;line-height:1.6">' +
+            '只收邮箱和昵称，用于登录与同步进度。' + (signup ? '' : '<a href="#" id="auForgot">忘记密码</a>') + '</div>' +
+        '</div>' +
+        '<div class="mf">' +
+          '<button class="btn ghost" id="auSwitch">' + (signup ? '已有账号，去登录' : '还没有账号，去注册') + '</button>' +
+          '<button class="btn primary" id="auGo">' + (signup ? '注册' : '登录') + '</button>' +
+        '</div>' +
+      '</div>';
+    }
+    function mount() {
+      wrap.innerHTML = html();
+      const msg = wrap.querySelector('#auMsg');
+      const go = wrap.querySelector('#auGo');
+      wrap.querySelector('#auSwitch').onclick = function () { mode = mode === 'signup' ? 'login' : 'signup'; mount(); };
+      const forgot = wrap.querySelector('#auForgot');
+      if (forgot) forgot.onclick = function (e) {
+        e.preventDefault();
+        const em = wrap.querySelector('#auMail').value.trim();
+        if (!em) { msg.textContent = '先填邮箱，再点忘记密码'; return; }
+        Auth.resetPassword(em)
+          .then(function () { msg.style.color = 'var(--ok)'; msg.textContent = '重置邮件已发出，去邮箱看看'; })
+          .catch(function (e2) { msg.style.color = 'var(--err)'; msg.textContent = e2.message; });
+      };
+      go.onclick = function () {
+        const em = wrap.querySelector('#auMail').value.trim();
+        const pw = wrap.querySelector('#auPass').value;
+        const nk = mode === 'signup' ? wrap.querySelector('#auNick').value.trim() : '';
+        msg.style.color = 'var(--err)';
+        if (!em || !pw) { msg.textContent = '邮箱和密码都要填'; return; }
+        if (mode === 'signup' && !nk) { msg.textContent = '起个昵称吧'; return; }
+        if (mode === 'signup' && pw.length < 6) { msg.textContent = '密码至少 6 位'; return; }
+        go.disabled = true; msg.textContent = '';
+        const act = mode === 'signup' ? Auth.signUp(em, pw, nk) : Auth.signIn(em, pw);
+        act.then(function (res) {
+          if (mode === 'signup' && res && res.signedIn === false) {
+            msg.style.color = 'var(--ok)';
+            msg.textContent = '注册成功。去邮箱点一下验证链接，然后回来登录。';
+            go.disabled = false;
+            return;
+          }
+          wrap.remove();
+          toast('已登录，正在同步进度…');
+          return Sync.pullAndMerge().then(function (stat) {
+            render();
+            if (stat && stat.首次上传) toast('本地进度已上传到云端', 'ok');
+            else if (stat && (stat.用了云端.length || stat.新增.length)) {
+              toast('已合并：云端取回 ' + (stat.用了云端.length + stat.新增.length) + ' 个模型，本地保留 ' + stat.用了本地.length + ' 个', 'ok', 6000);
+            } else toast('进度已同步', 'ok');
+          });
+        }).catch(function (e) {
+          msg.textContent = e.message; go.disabled = false;
+        });
+      };
+      wrap.querySelector('#auMail').focus();
+    }
+    wrap.onclick = function (e) { if (e.target === wrap) wrap.remove(); };
+    document.body.appendChild(wrap);
+    mount();
+  }
+
+  /* =========================================================================
+   * 班级看板（管理员）—— 能不能读到别人的数据由数据库策略决定，不是这里判断的
+   * =======================================================================*/
+  function viewBoard() {
+    setTimeout(function () {
+      const host = document.getElementById('boardBody');
+      if (!host) return;
+      Auth.loadClassBoard().then(function (rows) {
+        if (!rows || !rows.length) { host.innerHTML = '<div class="empty">还没有人注册。</div>'; return; }
+        const totalCells = DB.models.reduce(function (a, m) { return a + countInputs(m); }, 0);
+        host.innerHTML =
+          '<table class="kv-table"><thead><tr>' +
+            '<th>昵称</th><th>邮箱</th><th>已开始</th><th>已完成</th><th>答对格</th><th>用时</th><th>最后活跃</th>' +
+          '</tr></thead><tbody>' +
+          rows.map(function (x) {
+            const pr = x.profiles || {};
+            return '<tr>' +
+              '<td>' + esc(pr.nickname || '—') + '</td>' +
+              '<td style="font-size:12px;color:var(--ink-3)">' + esc(pr.email || '—') + '</td>' +
+              '<td class="n">' + (x.models_started || 0) + '</td>' +
+              '<td class="n">' + (x.models_completed || 0) + ' / ' + DB.models.length + '</td>' +
+              '<td class="n">' + (x.correct_cells || 0) + ' / ' + totalCells + '</td>' +
+              '<td class="n">' + Math.round((x.total_seconds || 0) / 60) + ' 分钟</td>' +
+              '<td style="font-size:12px">' + timeAgo(new Date(x.updated_at).getTime()) + '</td>' +
+            '</tr>';
+          }).join('') +
+          '</tbody></table>';
+      }).catch(function (e) {
+        host.innerHTML = '<div class="empty">读不到数据：' + esc(e.message) +
+          '<div style="font-size:12px;margin-top:8px">如果提示权限相关，检查一下你的账号是不是设成了 is_admin。</div></div>';
+      });
+    }, 0);
+
+    return '<div class="page-head"><div class="eyebrow">管理</div><h1>班级看板</h1>' +
+      '<div class="sub">每个登录过的学员的进度。数据由数据库的行级安全策略保护——只有管理员账号读得到这张表。</div></div>' +
+      '<div class="card pad" id="boardBody"><div class="empty">加载中…</div></div>';
   }
 
   function bindCards() {
@@ -1315,6 +1465,14 @@
     if (th === 'dark' || th === 'light') document.documentElement.setAttribute('data-theme', th);
     window.addEventListener('hashchange', render);
     render();
+
+    /* 账号是可选的：没配 config.js 就整块跳过 */
+    if (window.Auth && Auth.enabled()) {
+      Auth.init().then(function (u) {
+        if (window.Sync) Sync.start();
+        if (u) { render(); return Sync.pullAndMerge().then(function () { render(); }); }
+      }).catch(function (e) { console.warn('账号初始化失败，已退回本地模式', e); });
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
