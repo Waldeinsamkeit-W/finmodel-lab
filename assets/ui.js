@@ -89,27 +89,9 @@
   /* =========================================================================
    * 工作簿构建
    * =======================================================================*/
+  /* 取值函数统一由引擎提供（严格版：引用不到会报错，而不是悄悄当成 0） */
   function makeGetter(model, inputs, useSolution) {
-    const map = {};
-    model.sheets.forEach((s) => { map[s.name] = s; });
-    return function (sheetName, col, row) {
-      const sh = map[sheetName];
-      if (!sh) return { kind: 'number', raw: 0 };
-      if (row === 1) return { kind: 'text', raw: sh.header[col] || '' };
-      const r = sh.rows[row - 2];
-      if (!r) return { kind: 'number', raw: 0 };
-      if (col === 0) return { kind: 'text', raw: r.label || '' };
-      const c = (r.cells || [])[col - 1];
-      if (!c) return { kind: 'number', raw: 0 };
-      if (c.kind === 'given') return { kind: 'number', raw: c.v };
-      if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
-      if (c.kind === 'text') return { kind: 'text', raw: c.t };
-      if (c.kind === 'input') {
-        if (useSolution) return { kind: 'formula', raw: c.sol };
-        return { kind: 'formula', raw: inputs[sheetName + '!' + FML.addr(col, row)] || '' };
-      }
-      return { kind: 'number', raw: 0 };
-    };
+    return FML.makeGetter(model, inputs, useSolution);
   }
 
   function cellFmt(sheet, row, cell) { return (cell && cell.fmt) || row.fmt || undefined; }
@@ -140,6 +122,7 @@
   }
 
   function render() {
+    closeDrawer();
     if (S.model && S.startTs) { Store.addSeconds(S.model.id, Math.round((Date.now() - S.startTs) / 1000)); S.startTs = 0; }
     const r = parseRoute();
     S.model = null; S.actInfo = null; S.hintFor = null;
@@ -181,8 +164,13 @@
       '<span class="ico" style="color:' + i.color + '">●</span>' + esc(i.name) +
       '<span class="cnt">' + modelsOfIndustry(i.id).length + '</span></a>').join('');
 
+    const navTitle = (nav.filter(function (n) { return n.on; })[0] || {}).t || 'FinModel Lab';
     $app.innerHTML =
-      '<aside class="sidebar">' +
+      '<div class="mobile-bar">' +
+        '<button class="mb-burger" id="mbBurger" aria-label="打开菜单">☰</button>' +
+        '<div class="mb-title">' + esc(navTitle) + '</div>' +
+      '</div>' +
+      '<aside class="sidebar" id="sideNav">' +
         '<a class="brand" href="#/" style="text-decoration:none;color:inherit">' +
           '<div class="brand-mark">FM</div>' +
           '<div class="brand-text"><b>FinModel Lab</b><span>财务模型实训</span></div>' +
@@ -201,6 +189,7 @@
 
     const tb = document.getElementById('themeBtn');
     if (tb) tb.onclick = toggleTheme;
+    bindDrawer();
     bindAccount();
     bindCards();
   }
@@ -350,6 +339,36 @@
     return '<div class="page-head"><div class="eyebrow">管理</div><h1>班级看板</h1>' +
       '<div class="sub">每个登录过的学员的进度。数据由数据库的行级安全策略保护——只有管理员账号读得到这张表。</div></div>' +
       '<div class="card pad" id="boardBody"><div class="empty">加载中…</div></div>';
+  }
+
+  /* ------------------------------------------------------------ 移动端抽屉 */
+  function isNarrow() { return window.innerWidth <= 860; }
+
+  function closeDrawer() {
+    const sn = document.getElementById('sideNav');
+    if (sn) sn.classList.remove('open');
+    const bd = document.getElementById('navBackdrop');
+    if (bd) bd.remove();
+  }
+
+  function bindDrawer() {
+    const b = document.getElementById('mbBurger');
+    const sn = document.getElementById('sideNav');
+    if (!b || !sn) return;
+    b.onclick = function () {
+      const open = sn.classList.toggle('open');
+      if (open) {
+        const bd = document.createElement('div');
+        bd.className = 'nav-backdrop';
+        bd.id = 'navBackdrop';
+        bd.onclick = closeDrawer;
+        document.body.appendChild(bd);
+      } else closeDrawer();
+    };
+    /* 点导航项后自动收起，否则手机上会挡住内容 */
+    Array.prototype.forEach.call(sn.querySelectorAll('a.nav-item'), function (a) {
+      a.addEventListener('click', function () { if (isNarrow()) closeDrawer(); });
+    });
   }
 
   function bindCards() {
@@ -1031,7 +1050,7 @@
           '<button class="btn primary sm" id="btnCheck">检查全部</button>' +
         '</div>' +
         '<div class="lab-body">' +
-          '<div class="lab-side" id="labSide"></div>' +
+          '<div class="lab-side' + (isNarrow() ? ' collapsed' : '') + '" id="labSide"></div>' +
           '<div class="lab-main">' +
             '<div class="tabs" id="tabs"></div>' +
             '<div class="fx-bar">' +

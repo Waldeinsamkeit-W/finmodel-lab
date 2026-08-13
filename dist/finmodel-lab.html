@@ -426,8 +426,15 @@ button { font-family: inherit; font-size: inherit; cursor: pointer; }
   display: flex; align-items: center; gap: 12px; padding: 10px 18px;
   background: var(--surface); border-bottom: 1px solid var(--border); flex: 0 0 auto;
 }
-.lab-head .lh-title { font-weight: 640; font-size: 15px; letter-spacing: -.01em; }
-.lab-head .lh-meta { font-size: 11.5px; color: var(--ink-3); }
+.lab-head > div { min-width: 0; }
+.lab-head .lh-title {
+  font-weight: 640; font-size: 15px; letter-spacing: -.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lab-head .lh-meta {
+  font-size: 11.5px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .lab-head .spacer { flex: 1; }
 .save-dot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
 .save-dot i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
@@ -616,10 +623,61 @@ kbd {
   border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; color: var(--ink-2);
 }
 
+/* ------------------------------------------------------ 移动端顶栏（≤860px 才出现） */
+.mobile-bar { display: none; }
 @media (max-width: 860px) {
-  .sidebar { display: none; }
+  .mobile-bar {
+    display: flex; align-items: center; gap: 10px;
+    position: sticky; top: 0; z-index: 40;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 8px 12px; height: 48px;
+  }
+  .mobile-bar .mb-burger {
+    width: 34px; height: 34px; flex: 0 0 34px; border-radius: 8px;
+    border: 1px solid var(--border-strong); background: var(--surface);
+    display: grid; place-items: center; font-size: 15px; color: var(--ink-2);
+  }
+  .mobile-bar .mb-title { font-weight: 640; font-size: 14.5px; letter-spacing: -.02em; }
+
+  /* 侧边栏改成抽屉 */
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 60;
+    width: 264px; flex-basis: 264px; height: 100dvh;
+    transform: translateX(-100%); transition: transform .22s ease;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .nav-backdrop {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(10, 14, 22, .45);
+  }
+
+  #app { flex-direction: column; }
   .container { padding: 20px 16px 60px; }
-  .lab-side { position: absolute; z-index: 20; height: calc(100vh - 52px); box-shadow: var(--shadow-lg); }
+
+  /* 建模页：头部改成两行，按钮横向可滚动 */
+  .lab { height: auto; min-height: 100dvh; }
+  .lab-head { flex-wrap: wrap; padding: 8px 12px; gap: 8px; row-gap: 6px; }
+  .lab-head > div:nth-of-type(1) { order: 2; flex: 1 1 100%; }
+  .lab-head .spacer { display: none; }
+  .lab-head .chip, .lab-head .save-dot { order: 3; }
+  .lab-head .btn { order: 4; }
+  .lab-head #btnBack { order: 1; }
+  .lab-head .lh-title { font-size: 14.5px; white-space: normal; }
+  .lab-head .lh-meta { white-space: normal; }
+
+  /* 说明栏在手机上做成覆盖层，默认收起（由 JS 初始化时加 collapsed） */
+  .lab-side {
+    position: absolute; left: 0; top: 0; z-index: 20;
+    width: 88%; max-width: 340px; flex-basis: auto;
+    height: 100%; box-shadow: var(--shadow-lg);
+  }
+  .lab-body { position: relative; }
+  .sheet-wrap { padding: 12px 10px 32px; -webkit-overflow-scrolling: touch; }
+  .tabs { padding: 6px 8px 0; }
+  .fx-addr { width: 78px; flex-basis: 78px; }
+  table.grid td.lbl { min-width: 150px; max-width: 200px; }
+  td.cell { min-width: 92px; }
 }
 
 /* ------------------------------------------------------ 答错诊断 */
@@ -692,8 +750,46 @@ window.FML_CONFIG = {
   const RE_REF = /^\$?([A-Za-z]{1,2})\$?([0-9]{1,5})/;
   const RE_WORD = /[A-Za-z0-9_.一-龥]/;
 
+  /* 中文输入法下最高频的意外：全角符号。＝（），：等在公式里永远是笔误，
+     直接归一化成半角，不用让学员为输入法的事卡住。
+     引号内的内容（表名、字符串）要原样保留——表名里带全角括号是合法的。 */
+  const FULLWIDTH = {
+    '＝': '=', '（': '(', '）': ')', '，': ',', '：': ':', '！': '!', '＄': '$',
+    '＋': '+', '－': '-', '−': '-', '—': '-', '＊': '*', '／': '/', '÷': '/',
+    '＾': '^', '＜': '<', '＞': '>', '％': '%', '＆': '&', '。': '.', '、': ',',
+    '～': '~', '｜': '|'
+  };
+  /* 弯引号一律先转直引号——它们在任何位置都只可能是引号 */
+  function straightenQuotes(s) {
+    return s.replace(/[\u2018\u2019\uFF07]/g, "'").replace(/[\u201C\u201D\uFF02]/g, '"');
+  }
+  /* 全角数字与字母也一并转半角 */
+  function narrowAlnum(ch) {
+    const c = ch.charCodeAt(0);
+    if (c >= 0xFF10 && c <= 0xFF19) return String.fromCharCode(c - 0xFEE0); // ０-９
+    if (c >= 0xFF21 && c <= 0xFF3A) return String.fromCharCode(c - 0xFEE0); // Ａ-Ｚ
+    if (c >= 0xFF41 && c <= 0xFF5A) return String.fromCharCode(c - 0xFEE0); // ａ-ｚ
+    return null;
+  }
+  function normalizeFullwidth(src) {
+    const s = straightenQuotes(String(src));
+    let out = '', quote = null;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (quote) {                       // 引号内原样保留
+        out += ch;
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
+      const alnum = narrowAlnum(ch);
+      out += (FULLWIDTH[ch] !== undefined ? FULLWIDTH[ch] : (alnum !== null ? alnum : ch));
+    }
+    return out;
+  }
+
   function tokenize(src) {
-    const s = String(src);
+    const s = normalizeFullwidth(src);
     const out = [];
     let i = 0;
     const isDigit = (c) => c >= '0' && c <= '9';
@@ -769,7 +865,8 @@ window.FML_CONFIG = {
       if (two === '<=' || two === '>=' || two === '<>') { out.push({ t: 'op', v: two }); i += 2; continue; }
       if ('+-*/^&=<>(),:'.indexOf(c) >= 0) { out.push({ t: 'op', v: c }); i++; continue; }
 
-      throw new Error('无法识别的符号：' + c);
+      throw new Error('无法识别的符号「' + c + '」。如果它看起来和键盘上的一样，'
+        + '多半是输入法打成了全角——把输入法切到英文半角再试。');
     }
     return out;
   }
@@ -1052,7 +1149,10 @@ window.FML_CONFIG = {
       else if (cell.kind === 'text') out = cell.raw;
       else if (cell.kind === 'number') out = cell.raw;
       else {
-        const raw = String(cell.raw === undefined || cell.raw === null ? '' : cell.raw).trim();
+        let raw = String(cell.raw === undefined || cell.raw === null ? '' : cell.raw).trim();
+        /* 开头的全角等号在这里就要转掉：下面是按 raw[0] === '=' 判断是不是公式的，
+           tokenize 里的归一化来得太晚，＝B3 会被当成普通文本走到比较运算符那条路上去。 */
+        if (raw[0] === '＝') raw = '=' + raw.slice(1);
         if (raw === '') out = 0;
         else if (raw[0] === '=') out = evaluate(compile(raw.slice(1)), { sheet: sheetName, get: this.get.bind(this) });
         else {
@@ -1134,7 +1234,56 @@ window.FML_CONFIG = {
   }
 
   /* ------------------------------------------------------------------ 导出 */
+  /* --------------------------------------------------------------------------
+   * makeGetter —— 把「模型定义 + 用户输入」包成 Workbook 需要的取值函数。
+   *
+   * 关键在于**引用不到就报错，而不是当成 0**。
+   * 写错表名、或写了超出范围的行号，公式语法完全合法、也算得出一个数，
+   * 但那个数是假的——这是学员最难自己发现的一类错。宁可直接报错。
+   *
+   * 注意：分节标题行、空行里的空格仍然返回 0——那是合法的，
+   * SUM(B3:B10) 跨过一个小标题行是正常写法。
+   * ------------------------------------------------------------------------*/
+  function makeGetter(model, inputs, useSolution) {
+    const map = {}, names = [];
+    (model.sheets || []).forEach(function (s) { map[s.name] = s; names.push(s.name); });
+    inputs = inputs || {};
+
+    return function (sheetName, col, row) {
+      const sh = map[sheetName];
+      if (!sh) {
+        throw new Error('找不到名为「' + sheetName + '」的表。本模型的表是：' +
+          names.join('、') + '。表名要一字不差（含标点）。');
+      }
+      if (row === 1) return { kind: 'text', raw: sh.header[col] || '' };
+
+      const maxRow = (sh.rows || []).length + 1;
+      if (row < 1 || row > maxRow) {
+        throw new Error('「' + sheetName + '」没有第 ' + row + ' 行（这张表到第 ' + maxRow + ' 行为止）。');
+      }
+      const maxCol = (sh.header || []).length - 1;
+      if (col < 0 || col > maxCol) {
+        throw new Error('「' + sheetName + '」没有 ' + idxToCol(col) + ' 列（这张表到 ' + idxToCol(maxCol) + ' 列为止）。');
+      }
+
+      const r = sh.rows[row - 2];
+      if (!r) return { kind: 'number', raw: 0 };
+      if (col === 0) return { kind: 'text', raw: r.label || '' };
+      const c = (r.cells || [])[col - 1];
+      if (!c) return { kind: 'number', raw: 0 };        // 分节行/空行里的空格，合法
+      if (c.kind === 'given') return { kind: 'number', raw: c.v };
+      if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
+      if (c.kind === 'text') return { kind: 'text', raw: c.t };
+      if (c.kind === 'input') {
+        if (useSolution) return { kind: 'formula', raw: c.sol };
+        return { kind: 'formula', raw: inputs[sheetName + '!' + addr(col, row)] || '' };
+      }
+      return { kind: 'number', raw: 0 };
+    };
+  }
+
   global.FML = {
+    makeGetter: makeGetter,
     scanRefs: scanRefs,
     translate: translate,
     colToIdx: colToIdx,
@@ -10970,27 +11119,9 @@ window.FML_CONFIG = {
   /* =========================================================================
    * 工作簿构建
    * =======================================================================*/
+  /* 取值函数统一由引擎提供（严格版：引用不到会报错，而不是悄悄当成 0） */
   function makeGetter(model, inputs, useSolution) {
-    const map = {};
-    model.sheets.forEach((s) => { map[s.name] = s; });
-    return function (sheetName, col, row) {
-      const sh = map[sheetName];
-      if (!sh) return { kind: 'number', raw: 0 };
-      if (row === 1) return { kind: 'text', raw: sh.header[col] || '' };
-      const r = sh.rows[row - 2];
-      if (!r) return { kind: 'number', raw: 0 };
-      if (col === 0) return { kind: 'text', raw: r.label || '' };
-      const c = (r.cells || [])[col - 1];
-      if (!c) return { kind: 'number', raw: 0 };
-      if (c.kind === 'given') return { kind: 'number', raw: c.v };
-      if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
-      if (c.kind === 'text') return { kind: 'text', raw: c.t };
-      if (c.kind === 'input') {
-        if (useSolution) return { kind: 'formula', raw: c.sol };
-        return { kind: 'formula', raw: inputs[sheetName + '!' + FML.addr(col, row)] || '' };
-      }
-      return { kind: 'number', raw: 0 };
-    };
+    return FML.makeGetter(model, inputs, useSolution);
   }
 
   function cellFmt(sheet, row, cell) { return (cell && cell.fmt) || row.fmt || undefined; }
@@ -11021,6 +11152,7 @@ window.FML_CONFIG = {
   }
 
   function render() {
+    closeDrawer();
     if (S.model && S.startTs) { Store.addSeconds(S.model.id, Math.round((Date.now() - S.startTs) / 1000)); S.startTs = 0; }
     const r = parseRoute();
     S.model = null; S.actInfo = null; S.hintFor = null;
@@ -11062,8 +11194,13 @@ window.FML_CONFIG = {
       '<span class="ico" style="color:' + i.color + '">●</span>' + esc(i.name) +
       '<span class="cnt">' + modelsOfIndustry(i.id).length + '</span></a>').join('');
 
+    const navTitle = (nav.filter(function (n) { return n.on; })[0] || {}).t || 'FinModel Lab';
     $app.innerHTML =
-      '<aside class="sidebar">' +
+      '<div class="mobile-bar">' +
+        '<button class="mb-burger" id="mbBurger" aria-label="打开菜单">☰</button>' +
+        '<div class="mb-title">' + esc(navTitle) + '</div>' +
+      '</div>' +
+      '<aside class="sidebar" id="sideNav">' +
         '<a class="brand" href="#/" style="text-decoration:none;color:inherit">' +
           '<div class="brand-mark">FM</div>' +
           '<div class="brand-text"><b>FinModel Lab</b><span>财务模型实训</span></div>' +
@@ -11082,6 +11219,7 @@ window.FML_CONFIG = {
 
     const tb = document.getElementById('themeBtn');
     if (tb) tb.onclick = toggleTheme;
+    bindDrawer();
     bindAccount();
     bindCards();
   }
@@ -11231,6 +11369,36 @@ window.FML_CONFIG = {
     return '<div class="page-head"><div class="eyebrow">管理</div><h1>班级看板</h1>' +
       '<div class="sub">每个登录过的学员的进度。数据由数据库的行级安全策略保护——只有管理员账号读得到这张表。</div></div>' +
       '<div class="card pad" id="boardBody"><div class="empty">加载中…</div></div>';
+  }
+
+  /* ------------------------------------------------------------ 移动端抽屉 */
+  function isNarrow() { return window.innerWidth <= 860; }
+
+  function closeDrawer() {
+    const sn = document.getElementById('sideNav');
+    if (sn) sn.classList.remove('open');
+    const bd = document.getElementById('navBackdrop');
+    if (bd) bd.remove();
+  }
+
+  function bindDrawer() {
+    const b = document.getElementById('mbBurger');
+    const sn = document.getElementById('sideNav');
+    if (!b || !sn) return;
+    b.onclick = function () {
+      const open = sn.classList.toggle('open');
+      if (open) {
+        const bd = document.createElement('div');
+        bd.className = 'nav-backdrop';
+        bd.id = 'navBackdrop';
+        bd.onclick = closeDrawer;
+        document.body.appendChild(bd);
+      } else closeDrawer();
+    };
+    /* 点导航项后自动收起，否则手机上会挡住内容 */
+    Array.prototype.forEach.call(sn.querySelectorAll('a.nav-item'), function (a) {
+      a.addEventListener('click', function () { if (isNarrow()) closeDrawer(); });
+    });
   }
 
   function bindCards() {
@@ -11912,7 +12080,7 @@ window.FML_CONFIG = {
           '<button class="btn primary sm" id="btnCheck">检查全部</button>' +
         '</div>' +
         '<div class="lab-body">' +
-          '<div class="lab-side" id="labSide"></div>' +
+          '<div class="lab-side' + (isNarrow() ? ' collapsed' : '') + '" id="labSide"></div>' +
           '<div class="lab-main">' +
             '<div class="tabs" id="tabs"></div>' +
             '<div class="fx-bar">' +

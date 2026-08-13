@@ -25,8 +25,46 @@
   const RE_REF = /^\$?([A-Za-z]{1,2})\$?([0-9]{1,5})/;
   const RE_WORD = /[A-Za-z0-9_.一-龥]/;
 
+  /* 中文输入法下最高频的意外：全角符号。＝（），：等在公式里永远是笔误，
+     直接归一化成半角，不用让学员为输入法的事卡住。
+     引号内的内容（表名、字符串）要原样保留——表名里带全角括号是合法的。 */
+  const FULLWIDTH = {
+    '＝': '=', '（': '(', '）': ')', '，': ',', '：': ':', '！': '!', '＄': '$',
+    '＋': '+', '－': '-', '−': '-', '—': '-', '＊': '*', '／': '/', '÷': '/',
+    '＾': '^', '＜': '<', '＞': '>', '％': '%', '＆': '&', '。': '.', '、': ',',
+    '～': '~', '｜': '|'
+  };
+  /* 弯引号一律先转直引号——它们在任何位置都只可能是引号 */
+  function straightenQuotes(s) {
+    return s.replace(/[\u2018\u2019\uFF07]/g, "'").replace(/[\u201C\u201D\uFF02]/g, '"');
+  }
+  /* 全角数字与字母也一并转半角 */
+  function narrowAlnum(ch) {
+    const c = ch.charCodeAt(0);
+    if (c >= 0xFF10 && c <= 0xFF19) return String.fromCharCode(c - 0xFEE0); // ０-９
+    if (c >= 0xFF21 && c <= 0xFF3A) return String.fromCharCode(c - 0xFEE0); // Ａ-Ｚ
+    if (c >= 0xFF41 && c <= 0xFF5A) return String.fromCharCode(c - 0xFEE0); // ａ-ｚ
+    return null;
+  }
+  function normalizeFullwidth(src) {
+    const s = straightenQuotes(String(src));
+    let out = '', quote = null;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (quote) {                       // 引号内原样保留
+        out += ch;
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
+      const alnum = narrowAlnum(ch);
+      out += (FULLWIDTH[ch] !== undefined ? FULLWIDTH[ch] : (alnum !== null ? alnum : ch));
+    }
+    return out;
+  }
+
   function tokenize(src) {
-    const s = String(src);
+    const s = normalizeFullwidth(src);
     const out = [];
     let i = 0;
     const isDigit = (c) => c >= '0' && c <= '9';
@@ -102,7 +140,8 @@
       if (two === '<=' || two === '>=' || two === '<>') { out.push({ t: 'op', v: two }); i += 2; continue; }
       if ('+-*/^&=<>(),:'.indexOf(c) >= 0) { out.push({ t: 'op', v: c }); i++; continue; }
 
-      throw new Error('无法识别的符号：' + c);
+      throw new Error('无法识别的符号「' + c + '」。如果它看起来和键盘上的一样，'
+        + '多半是输入法打成了全角——把输入法切到英文半角再试。');
     }
     return out;
   }
@@ -385,7 +424,10 @@
       else if (cell.kind === 'text') out = cell.raw;
       else if (cell.kind === 'number') out = cell.raw;
       else {
-        const raw = String(cell.raw === undefined || cell.raw === null ? '' : cell.raw).trim();
+        let raw = String(cell.raw === undefined || cell.raw === null ? '' : cell.raw).trim();
+        /* 开头的全角等号在这里就要转掉：下面是按 raw[0] === '=' 判断是不是公式的，
+           tokenize 里的归一化来得太晚，＝B3 会被当成普通文本走到比较运算符那条路上去。 */
+        if (raw[0] === '＝') raw = '=' + raw.slice(1);
         if (raw === '') out = 0;
         else if (raw[0] === '=') out = evaluate(compile(raw.slice(1)), { sheet: sheetName, get: this.get.bind(this) });
         else {
@@ -467,7 +509,56 @@
   }
 
   /* ------------------------------------------------------------------ 导出 */
+  /* --------------------------------------------------------------------------
+   * makeGetter —— 把「模型定义 + 用户输入」包成 Workbook 需要的取值函数。
+   *
+   * 关键在于**引用不到就报错，而不是当成 0**。
+   * 写错表名、或写了超出范围的行号，公式语法完全合法、也算得出一个数，
+   * 但那个数是假的——这是学员最难自己发现的一类错。宁可直接报错。
+   *
+   * 注意：分节标题行、空行里的空格仍然返回 0——那是合法的，
+   * SUM(B3:B10) 跨过一个小标题行是正常写法。
+   * ------------------------------------------------------------------------*/
+  function makeGetter(model, inputs, useSolution) {
+    const map = {}, names = [];
+    (model.sheets || []).forEach(function (s) { map[s.name] = s; names.push(s.name); });
+    inputs = inputs || {};
+
+    return function (sheetName, col, row) {
+      const sh = map[sheetName];
+      if (!sh) {
+        throw new Error('找不到名为「' + sheetName + '」的表。本模型的表是：' +
+          names.join('、') + '。表名要一字不差（含标点）。');
+      }
+      if (row === 1) return { kind: 'text', raw: sh.header[col] || '' };
+
+      const maxRow = (sh.rows || []).length + 1;
+      if (row < 1 || row > maxRow) {
+        throw new Error('「' + sheetName + '」没有第 ' + row + ' 行（这张表到第 ' + maxRow + ' 行为止）。');
+      }
+      const maxCol = (sh.header || []).length - 1;
+      if (col < 0 || col > maxCol) {
+        throw new Error('「' + sheetName + '」没有 ' + idxToCol(col) + ' 列（这张表到 ' + idxToCol(maxCol) + ' 列为止）。');
+      }
+
+      const r = sh.rows[row - 2];
+      if (!r) return { kind: 'number', raw: 0 };
+      if (col === 0) return { kind: 'text', raw: r.label || '' };
+      const c = (r.cells || [])[col - 1];
+      if (!c) return { kind: 'number', raw: 0 };        // 分节行/空行里的空格，合法
+      if (c.kind === 'given') return { kind: 'number', raw: c.v };
+      if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
+      if (c.kind === 'text') return { kind: 'text', raw: c.t };
+      if (c.kind === 'input') {
+        if (useSolution) return { kind: 'formula', raw: c.sol };
+        return { kind: 'formula', raw: inputs[sheetName + '!' + addr(col, row)] || '' };
+      }
+      return { kind: 'number', raw: 0 };
+    };
+  }
+
   global.FML = {
+    makeGetter: makeGetter,
     scanRefs: scanRefs,
     translate: translate,
     colToIdx: colToIdx,

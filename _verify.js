@@ -10,25 +10,8 @@
 (function (global) {
   'use strict';
 
-  function getter(model) {
-    const map = {};
-    model.sheets.forEach(function (s) { map[s.name] = s; });
-    return function (sheetName, col, row) {
-      const sh = map[sheetName];
-      if (!sh) return { kind: 'number', raw: 0 };
-      if (row === 1) return { kind: 'text', raw: sh.header[col] || '' };
-      const r = sh.rows[row - 2];
-      if (!r) return { kind: 'number', raw: 0 };
-      if (col === 0) return { kind: 'text', raw: r.label || '' };
-      const c = (r.cells || [])[col - 1];
-      if (!c) return { kind: 'number', raw: 0 };
-      if (c.kind === 'given') return { kind: 'number', raw: c.v };
-      if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
-      if (c.kind === 'text') return { kind: 'text', raw: c.t };
-      if (c.kind === 'input') return { kind: 'formula', raw: c.sol };
-      return { kind: 'number', raw: 0 };
-    };
-  }
+  /* 取值函数用引擎里的严格版本，和网页端行为一致 */
+  function getter(model) { return global.FML.makeGetter(model, {}, true); }
 
   /* 只认「明确说了该等于多少」的行。光有「校验」两字不算——很多校验行是
      「合计应等于另一行」，值本身不是 0。 */
