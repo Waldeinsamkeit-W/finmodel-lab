@@ -548,12 +548,17 @@ td.cell.ok .disp { color: var(--ok); font-weight: 600; }
 td.cell.bad { background: var(--err-soft); }
 td.cell.bad .disp { color: var(--err); }
 td.cell.err .disp { color: var(--err); }
+/* 数对了，但是写死的常数或不等价的公式。数字本身不标红——错的不是这个数，
+   是得到它的方式，标红会让人去改数字。 */
+td.cell.warn { background: var(--warn-soft); }
+td.cell.warn .disp { color: var(--warn); font-weight: 600; }
 td.cell .mark {
   position: absolute; left: 3px; top: 50%; transform: translateY(-50%);
   font-size: 10px; line-height: 1; pointer-events: none;
 }
 td.cell.ok .mark { color: var(--ok); }
 td.cell.bad .mark { color: var(--err); }
+td.cell.warn .mark { color: var(--warn); font-weight: 700; }
 td.cell.locked::after {
   content: ""; position: absolute; right: 2px; top: 2px; width: 0; height: 0;
   border-top: 5px solid var(--ink-3); border-left: 5px solid transparent; opacity: .3;
@@ -614,6 +619,17 @@ th.colhdr { cursor: default; }
 .list-row .lr-sub { font-size: 12px; color: var(--ink-3); }
 
 .tag-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* 数据口径条：币种 / 量级 / 财年口径。这些是正确性信息，
+   比下面的自由文本说明更该被一眼看到，所以给等宽字体和边框。 */
+.prov-line {
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); line-height: 1.5;
+  background: var(--surface-3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 7px; margin-bottom: 6px;
+}
+.prov-docs { font-size: 12px; color: var(--ink-2); line-height: 1.6; margin-bottom: 6px; }
+.prov-docs a { color: var(--accent); }
+.prov-gap { font-size: 11.5px; color: var(--warn); line-height: 1.5; margin-bottom: 6px; }
 
 .footnote { font-size: 12px; color: var(--ink-3); line-height: 1.6; }
 .footnote code { font-family: var(--mono); background: var(--surface-3); padding: 1px 4px; border-radius: 3px; }
@@ -1243,11 +1259,27 @@ window.FML_CONFIG = {
    *
    * 注意：分节标题行、空行里的空格仍然返回 0——那是合法的，
    * SUM(B3:B10) 跨过一个小标题行是正常写法。
+   *
+   * opts（等价性判定用，见 grade.js）：
+   *   perturb(sheetName, col, row, v) -> v'
+   *     只作用在 given 格上。把真实数据换成一组「平行世界」的数据，
+   *     用来看某一格到底是从上游算出来的，还是写死的常数。
+   *   userOnly: 'sheet!ADDR'
+   *     只有这一格取用户输入，其余 input 格一律取参考公式。
+   *     作用是把每一格隔离开判定：上游填错不该连累下游那格的对错。
+   *   override: { 'sheet!ADDR': 数值 }
+   *     把指定格子直接钉成某个值，覆盖它原本的公式。
+   *     用来单独戳一格看下游反应，perturb 做不到这件事——
+   *     恒等式（资产=负债+权益）对所有 given 的等比扰动都免疫。
    * ------------------------------------------------------------------------*/
-  function makeGetter(model, inputs, useSolution) {
+  function makeGetter(model, inputs, useSolution, opts) {
     const map = {}, names = [];
     (model.sheets || []).forEach(function (s) { map[s.name] = s; names.push(s.name); });
     inputs = inputs || {};
+    opts = opts || {};
+    const perturb = opts.perturb || null;
+    const userOnly = opts.userOnly || null;
+    const override = opts.override || null;
 
     return function (sheetName, col, row) {
       const sh = map[sheetName];
@@ -1271,12 +1303,20 @@ window.FML_CONFIG = {
       if (col === 0) return { kind: 'text', raw: r.label || '' };
       const c = (r.cells || [])[col - 1];
       if (!c) return { kind: 'number', raw: 0 };        // 分节行/空行里的空格，合法
-      if (c.kind === 'given') return { kind: 'number', raw: c.v };
+      if (override) {
+        const ok = sheetName + '!' + addr(col, row);
+        if (ok in override) return { kind: 'number', raw: override[ok] };
+      }
+      if (c.kind === 'given') {
+        return { kind: 'number', raw: perturb ? perturb(sheetName, col, row, c.v) : c.v };
+      }
       if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
       if (c.kind === 'text') return { kind: 'text', raw: c.t };
       if (c.kind === 'input') {
-        if (useSolution) return { kind: 'formula', raw: c.sol };
-        return { kind: 'formula', raw: inputs[sheetName + '!' + addr(col, row)] || '' };
+        const key = sheetName + '!' + addr(col, row);
+        const useUser = userOnly ? (key === userOnly) : !useSolution;
+        if (!useUser) return { kind: 'formula', raw: c.sol };
+        return { kind: 'formula', raw: inputs[key] || '' };
       }
       return { kind: 'number', raw: 0 };
     };
@@ -1321,6 +1361,464 @@ window.FML_CONFIG = {
       return out;
     }
   };
+})(window);
+</script>
+<script>
+/* ===== assets/grade.js ===== */
+/* ============================================================================
+ * grade.js —— 作答判定
+ *
+ * 旧版只比最终数值，于是「不写公式、直接把正确答案敲进去」也算对。
+ * 那让整个站的前提失效了：学生练的是建模，不是抄数。
+ *
+ * 判定分三步，任何一步不过就是错：
+ *
+ *   1. 值      —— 和参考答案一致（容差见下）
+ *   2. 结构    —— 参考答案是从别的格子推出来的，你就不能填常数
+ *   3. 扰动    —— 把上游真实数据换成一组「平行世界」的数据整表重算，
+ *                 等价的写法在每个世界里都跟参考答案一致
+ *
+ * 第 3 步是关键。它同时解决三件事，且不需要逐格标注：
+ *
+ *   写死正确答案        → 平行世界里纹丝不动，参考答案却动了      → ✕
+ *   错公式碰巧同值      → 动了，但和参考答案的动法对不上          → ✕
+ *   写法不同但等价      → 在每个世界里都和参考答案一致            → ✓
+ *
+ * 最后一行是这个方案相对「比对引用集合」的全部价值：毛利可以写
+ * =收入-成本，也可以写 =收入*(1-成本率)，引用的格子完全不同，两个都对。
+ * 按引用集合判会把后者判错——误伤正确答案比放过一个写死的伤害大得多。
+ *
+ * 「填入你的假设」这类格子会自动豁免：参考答案自己就是常数，
+ * 第 2 步就放行了，不需要任何标注。
+ * ==========================================================================*/
+(function (global) {
+  'use strict';
+
+  const FML = global.FML;
+  const Grade = {};
+
+  /* --------------------------------------------------------------- 容差 */
+  /* 相对容差 1e-6。等价公式之间的浮点误差在 1e-15 量级，1e-6 已经很宽松。
+     旧版全站统一的 0.2% 是留给「手算中间值、四舍五入后填进去」的人的——
+     而那正是这次要禁掉的行为，所以跟着判定一起收紧。
+     源数据本身带舍入残差的格子，用 I(sol, {tol: 0.002}) 单独放宽。
+
+     绝对下限保持 1e-6：校验行的参考答案是 0，相对容差在那里退化成 0，
+     必须靠下限兜住浮点噪声。这个值是旧版一直在用的，56 个模型上验证过。 */
+  Grade.TOL = 1e-6;
+  const ABS_FLOOR = 1e-6;
+
+  function isNum(x) { return typeof x === 'number' && isFinite(x); }
+
+  function near(a, b, tol) {
+    if (!isNum(a) || !isNum(b)) return a === b;
+    const t = (tol === undefined || tol === null) ? Grade.TOL : tol;
+    return Math.abs(a - b) <= Math.max(ABS_FLOOR, Math.abs(b) * t);
+  }
+  Grade.near = near;
+
+  /* --------------------------------------------------------------- 扰动 */
+  const SEEDS = ['p1', 'p2'];
+
+  function hash32(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+
+  /* 每个 given 格乘一个 1.03~1.15 之间、由「表名+地址+种子」决定的固定因子。
+     几个约束都是有原因的：
+       · 保号、幅度小 —— 不会把永续增长率扰到超过折现率，也不会把分母扰成 0；
+       · 逐格不同     —— 整表等比缩放会让一大批比率类公式纹丝不动，那样
+                         写死的格子和正确的格子表现一样，就抓不出来了；
+       · 由地址定值   —— 同一格每次扰动结果相同，判定可复现，不会时对时错。 */
+  function mkPerturb(seed) {
+    return function (sheetName, col, row, v) {
+      if (!isNum(v) || v === 0) return v;
+      const h = hash32(sheetName + '|' + col + '|' + row + '|' + seed);
+      return v * (1.03 + (h % 1201) / 1201 * 0.12);
+    };
+  }
+
+  /* 公式里引用到的格子。sol 可能不带等号（_schema.js 允许），统一剥掉再看。 */
+  function refsOf(raw, sheetName) {
+    const s = String(raw === undefined || raw === null ? '' : raw).trim().replace(/^[=＝]/, '');
+    return s ? FML.refsOf(s, sheetName) : [];
+  }
+
+  /* 'sheet!B12' -> {sheet, col, row} */
+  function splitRef(ref) {
+    const i = ref.lastIndexOf('!');
+    if (i < 0) return null;
+    const m = /^([A-Za-z]{1,2})(\d{1,5})$/.exec(ref.slice(i + 1));
+    return m ? { sheet: ref.slice(0, i), col: FML.colToIdx(m[1]), row: parseInt(m[2], 10) } : null;
+  }
+
+  /* ------------------------------------------------------------- 判定器 */
+  /**
+   * @param model  模型定义
+   * @param inputs 用户输入表（按引用持有；改完调 reset()）
+   * @returns { of(sheet,col,row), reset(), scan() }
+   */
+  Grade.build = function (model, inputs) {
+    inputs = inputs || {};
+    const sheetByName = Object.create(null);
+    (model.sheets || []).forEach(function (s) { sheetByName[s.name] = s; });
+
+    let wbU, wbS, solP, iso, memo;
+
+    function fresh() {
+      wbU = new FML.Workbook(model, FML.makeGetter(model, inputs, false));
+      wbS = new FML.Workbook(model, FML.makeGetter(model, {}, true));
+      solP = Object.create(null);
+      SEEDS.forEach(function (sd) {
+        solP[sd] = new FML.Workbook(model, FML.makeGetter(model, {}, true, { perturb: mkPerturb(sd) }));
+      });
+      iso = Object.create(null);
+      memo = Object.create(null);
+    }
+    fresh();
+
+    /* 隔离工作簿：只有 key 这一格取用户输入，其余 input 格一律取参考公式。
+       否则上游填错会把下游每一格都判成不等价——那一格的公式明明是对的。 */
+    function isoWb(key, seed) {
+      const k = key + '@' + (seed || '-');
+      if (!iso[k]) {
+        iso[k] = new FML.Workbook(model, FML.makeGetter(model, inputs, false, {
+          userOnly: key, perturb: seed ? mkPerturb(seed) : null
+        }));
+      }
+      return iso[k];
+    }
+
+    function defOf(sheetName, col, row) {
+      const sh = sheetByName[sheetName];
+      if (!sh) return null;
+      const r = (sh.rows || [])[row - 2];
+      if (!r) return null;
+      return (r.cells || [])[col - 1] || null;
+    }
+
+    /* 逐个把公式引用到的格子钉成别的值，看这一格动不动。
+       只戳公式自己引用的格子，所以换一种合法写法不会被误判——
+       =收入-成本 和 =收入*(1-成本率) 各自对各自引用的格子敏感，两个都过。 */
+    function probeSensitive(mkWb, baseWb, refs, sheetName, col, row, tol) {
+      if (!refs.length) return false;
+      const base = baseWb.tryGet(sheetName, col, row);
+      if (!base.ok || !isNum(base.v)) return true;      // 测不了就别误伤
+
+      const seen = Object.create(null);
+      let probed = 0;
+      for (let i = 0; i < refs.length && probed < 6; i++) {
+        if (seen[refs[i]]) continue;
+        seen[refs[i]] = true;
+        const p = splitRef(refs[i]);
+        if (!p) continue;
+        const cur = baseWb.tryGet(p.sheet, p.col, p.row);
+        if (!cur.ok || !isNum(cur.v)) continue;
+        const ov = Object.create(null);
+        ov[refs[i]] = cur.v * 1.07 + 1;                 // +1 是为了 0 也能被戳动
+        const t = mkWb(ov).tryGet(sheetName, col, row);
+        probed++;
+        if (!t.ok) return true;                          // 依赖到报错，显然敏感
+        if (!near(t.v, base.v, tol)) return true;
+      }
+      return probed > 0 ? false : true;
+    }
+
+    /* 回退判定：用户公式对自己引用的格子完全不敏感，而参考答案是敏感的
+       —— 那就是 =0*C18+0 这种假引用。
+       两边都不敏感（=B3/$B$3*100 恒等于 100、IF 出来的布尔标记）说明这一格
+       本来就测不出敏感性，只能放过，不能算错。 */
+    function fakeRef(key, sheetName, col, row, raw, def, tol) {
+      const userSens = probeSensitive(
+        function (ov) {
+          return new FML.Workbook(model, FML.makeGetter(model, inputs, false, { userOnly: key, override: ov }));
+        },
+        isoWb(key, null), refsOf(raw, sheetName), sheetName, col, row, tol);
+      if (userSens) return false;
+
+      const solSens = probeSensitive(
+        function (ov) {
+          return new FML.Workbook(model, FML.makeGetter(model, {}, true, { override: ov }));
+        },
+        wbS, refsOf(def.sol, sheetName), sheetName, col, row, tol);
+      return solSens;
+    }
+
+    function equiv(sheetName, col, row, key, raw, def, tol) {
+      /* 第 2 步：结构。
+         参考答案是推出来的 → 你也得推；参考答案本身是常数 → 填常数合法。
+         这一道就挡住了 114728 和 =114728，且零误判。 */
+      const solRefs = refsOf(def.sol, sheetName).length;
+      if (solRefs === 0) return { ok: true };
+      if (refsOf(raw, sheetName).length === 0) return { ok: false, code: 'const' };
+
+      /* 第 3 步：扰动。 */
+      const base = isoWb(key, null).tryGet(sheetName, col, row);
+      const baseOk = base.ok && isNum(base.v);
+      let tested = 0, refMoved = false, userMoved = false, miss = null;
+
+      for (let i = 0; i < SEEDS.length; i++) {
+        const sd = SEEDS[i];
+        const sp = solP[sd].tryGet(sheetName, col, row);
+        /* 扰动把参考答案自己算炸了（除零之类），这一轮不作数 */
+        if (!sp.ok || !isNum(sp.v)) continue;
+        const up = isoWb(key, sd).tryGet(sheetName, col, row);
+        /* 换一组数据你的公式就报错，说明它依赖了这组数据的巧合 */
+        if (!up.ok) return { ok: false, code: 'nonequiv', refVal: sp.v, yourVal: null, err: up.err };
+        tested++;
+        if (baseOk && !near(sp.v, base.v, tol)) refMoved = true;
+        if (baseOk && isNum(up.v) && !near(up.v, base.v, tol)) userMoved = true;
+        if (!near(up.v, sp.v, tol) && !miss) miss = { refVal: sp.v, yourVal: up.v };
+      }
+
+      /* 参考答案对 given 的扰动免疫——典型是恒等式校验行（资产-负债-权益
+         在任何一组数据下都是 0）。这时「动没动」这个信号失效，改用回退探测。 */
+      if (!tested || !refMoved) {
+        return fakeRef(key, sheetName, col, row, raw, def, tol) ? { ok: false, code: 'const' } : { ok: true };
+      }
+      if (!miss) return { ok: true };
+      if (!userMoved) return { ok: false, code: 'const', refVal: miss.refVal, yourVal: miss.yourVal };
+      return { ok: false, code: 'nonequiv', refVal: miss.refVal, yourVal: miss.yourVal };
+    }
+
+    function compute(sheetName, col, row, key) {
+      const def = defOf(sheetName, col, row);
+      if (!def || def.kind !== 'input') return { ok: false, code: 'notinput' };
+      const raw = inputs[key] || '';
+      if (!raw) return { ok: false, code: 'blank' };
+
+      const tol = (def.tol === undefined || def.tol === null) ? Grade.TOL : def.tol;
+      const u = wbU.tryGet(sheetName, col, row);
+      const s = wbS.tryGet(sheetName, col, row);
+
+      if (!u.ok) return { ok: false, code: 'err', err: u.err, solVal: s.ok ? s.v : null };
+      if (!s.ok) return { ok: false, code: 'solerr', err: s.err, userVal: u.v };
+      if (!near(u.v, s.v, tol)) return { ok: false, code: 'value', userVal: u.v, solVal: s.v };
+
+      const eq = equiv(sheetName, col, row, key, raw, def, tol);
+      if (eq.ok) return { ok: true, code: 'ok', userVal: u.v, solVal: s.v };
+      return {
+        ok: false, code: eq.code, userVal: u.v, solVal: s.v,
+        refVal: eq.refVal, yourVal: eq.yourVal, err: eq.err
+      };
+    }
+
+    const g = {};
+
+    g.of = function (sheetName, col, row) {
+      const key = sheetName + '!' + FML.addr(col, row);
+      if (key in memo) return memo[key];
+      let v;
+      try { v = compute(sheetName, col, row, key); }
+      catch (e) { v = { ok: false, code: 'err', err: e.message }; }
+      memo[key] = v;
+      return v;
+    };
+
+    /* 输入变了就调它。工作簿按引用持有 inputs，重建只是清缓存，求值仍是惰性的。 */
+    g.reset = function () { fresh(); };
+
+    /* 这一格的参考答案是不是「与数据无关的常数」。
+       百分比合计恒为 1、指数基期恒为 100、IF 出来的布尔标记、恒等式校验行恒为 0
+       ——这类格子的正确公式本身就是常数函数，行为上和一个伪装成公式的常数
+       （=0*B3+1）完全不可区分。它们只受结构检查保护：直接敲 1 会被判错，
+       但刻意写成 =0*B3+1 抓不出来。
+       这是方法的原理边界，不是实现缺陷。verifyGrading() 会统计它的规模。 */
+    g.invariant = function (sheetName, col, row) {
+      const def = defOf(sheetName, col, row);
+      if (!def || def.kind !== 'input') return false;
+      const tol = (def.tol === undefined || def.tol === null) ? Grade.TOL : def.tol;
+      const b = wbS.tryGet(sheetName, col, row);
+      if (!b.ok || !isNum(b.v)) return false;
+      for (let i = 0; i < SEEDS.length; i++) {
+        const sp = solP[SEEDS[i]].tryGet(sheetName, col, row);
+        if (sp.ok && isNum(sp.v) && !near(sp.v, b.v, tol)) return false;
+      }
+      return !probeSensitive(
+        function (ov) {
+          return new FML.Workbook(model, FML.makeGetter(model, {}, true, { override: ov }));
+        },
+        wbS, refsOf(def.sol, sheetName), sheetName, col, row, tol);
+    };
+
+    /* 全表统计。返回 {correct, total, filled} */
+    g.scan = function () {
+      let correct = 0, total = 0, filled = 0;
+      (model.sheets || []).forEach(function (sh) {
+        (sh.rows || []).forEach(function (r, ri) {
+          const rowNum = ri + 2;
+          (r.cells || []).forEach(function (cell, ci) {
+            if (!cell || cell.kind !== 'input') return;
+            total++;
+            const v = g.of(sh.name, ci + 1, rowNum);
+            if (v.code === 'blank') return;
+            filled++;
+            if (v.ok) correct++;
+          });
+        });
+      });
+      return { correct: correct, total: total, filled: filled };
+    };
+
+    return g;
+  };
+
+  /* 判定结果的一句话说明，给格子的 tooltip 和状态栏用。
+     完整的诊断文案在 diagnose.js 里。 */
+  Grade.label = function (code) {
+    switch (code) {
+      case 'ok': return '正确';
+      case 'err': return '公式算不出来';
+      case 'solerr': return '参考答案在当前数据下算不出来';
+      case 'value': return '结果和参考答案不一致';
+      case 'const': return '结果对，但这一格是写死的常数，不是算出来的';
+      case 'nonequiv': return '结果对，但公式和参考答案不等价';
+      default: return '';
+    }
+  };
+
+  global.Grade = Grade;
+})(window);
+</script>
+<script>
+/* ===== assets/provenance.js ===== */
+/* ============================================================================
+ * provenance.js —— 数据口径
+ *
+ * 币种、量级、财年口径是**正确性问题**，不只是可信度问题：
+ * 学生分不清一张表是「百万元」还是「元」、是自然年还是 9 月底结账的财年，
+ * 算出来的东西直接是错的，而且这种错不会触发任何校验。
+ *
+ * 这里做两件事：
+ *
+ *   derive(model)  从已有的结构化字段推口径 —— sheet.unit 和表头里的年份标记。
+ *                  全部 56 个模型都能推出来，不需要人工填，也就不会写着写着过期。
+ *
+ *   gaps(model)    列出只有人能填、推不出来的部分：原始公告链接、页码、
+ *                  数据截止日、复核人。这些**不编**，缺就明确显示缺。
+ *
+ * 模型可以声明一个可选的 source 块补上后者：
+ *
+ *   source: {
+ *     docs: [{ title:'Apple Inc. Form 10-K', period:'FY2024',
+ *              statement:'合并利润表', page:'31', url:'https://...' }],
+ *     asOf: '2024-09-28',        // 数据截止日（财年结束日，不是发布日）
+ *     version: '2024.1',
+ *     updated: '2026-08-16',
+ *     reviewedBy: null           // 没有第三方复核就写 null，别填自己
+ *   }
+ * ==========================================================================*/
+(function (global) {
+  'use strict';
+
+  const Prov = {};
+
+  /* unit 是自由文本，但写法足够一致，能可靠地认出币种和量级。
+     认不出来的不猜，返回空数组，由 gaps() 报出去。 */
+  const SCALE = [[/十亿/, '十亿'], [/亿/, '亿'], [/百万/, '百万'], [/万/, '万']];
+
+  /* 先认外币，再把外币词去掉；如果还剩「元」，按中文财报惯例就是人民币
+     （「百万元」「亿元」「万元」都是这么写的）。顺序不能反：
+     「百万美元 / 美元」里也有「元」，先认美元才不会被算成两种币种。 */
+  function currencyOf(unit) {
+    const out = [];
+    let rest = String(unit || '');
+    if (/美元/.test(rest)) { out.push('美元 USD'); rest = rest.replace(/美元/g, ''); }
+    if (/港元/.test(rest)) { out.push('港元 HKD'); rest = rest.replace(/港元/g, ''); }
+    if (/欧元/.test(rest)) { out.push('欧元 EUR'); rest = rest.replace(/欧元/g, ''); }
+    if (/日元/.test(rest)) { out.push('日元 JPY'); rest = rest.replace(/日元/g, ''); }
+    if (/元/.test(rest)) out.push('人民币 CNY');
+    return out;
+  }
+
+  function scanUnits(model) {
+    const cur = {}, scale = {}, raw = {};
+    (model.sheets || []).forEach(function (s) {
+      const u = String(s.unit || '');
+      raw[u] = true;
+      currencyOf(u).forEach(function (c) { cur[c] = true; });
+      /* 「百万」要先于「万」匹配，所以命中一个就停 */
+      for (let i = 0; i < SCALE.length; i++) {
+        if (SCALE[i][0].test(u)) { scale[SCALE[i][1]] = true; break; }
+      }
+    });
+    return { currencies: Object.keys(cur), scales: Object.keys(scale), units: Object.keys(raw) };
+  }
+
+  /* 表头里的年份标记：2024 / FY2024 / 2024A / 2025E。
+     FY 前缀说明不是自然年（苹果 9 月底结账），E 说明含预测期。 */
+  const YEAR = /^(FY)?((?:19|20)\d{2})([AEF])?$/;
+
+  function scanYears(model) {
+    let lo = null, hi = null, fyPrefix = false, hasEst = false, seen = 0;
+    (model.sheets || []).forEach(function (s) {
+      (s.header || []).forEach(function (h) {
+        const m = YEAR.exec(String(h || '').trim());
+        if (!m) return;
+        seen++;
+        const y = parseInt(m[2], 10);
+        if (lo === null || y < lo) lo = y;
+        if (hi === null || y > hi) hi = y;
+        if (m[1]) fyPrefix = true;
+        if (m[3] === 'E' || m[3] === 'F') hasEst = true;
+      });
+    });
+    return { from: lo, to: hi, fyPrefix: fyPrefix, hasEstimate: hasEst, count: seen };
+  }
+
+  /** 从已有结构化字段推出来的口径。不含任何人工填写的内容。 */
+  Prov.derive = function (model) {
+    const u = scanUnits(model);
+    const y = scanYears(model);
+    return {
+      currencies: u.currencies,
+      scales: u.scales,
+      units: u.units,
+      fiscalFrom: y.from,
+      fiscalTo: y.to,
+      /* FY 前缀 = 非自然年财年；没有年份列的模型（纯假设类）返回 null 而不是瞎猜 */
+      fiscalBasis: y.count === 0 ? null : (y.fyPrefix ? '公司财年（非自然年）' : '自然年'),
+      hasEstimate: y.hasEstimate,
+      multiCurrency: u.currencies.length > 1
+    };
+  };
+
+  /** 只有人能填的部分，缺什么列什么。 */
+  Prov.gaps = function (model) {
+    const s = model.source || {};
+    const out = [];
+    if (!s.docs || !s.docs.length) out.push('原始文件（公告 / 年报 / 10-K 的名称与期间）');
+    else {
+      if (!s.docs.some(function (d) { return d.url; })) out.push('原文链接');
+      if (!s.docs.some(function (d) { return d.page || d.statement; })) out.push('报表名或页码');
+    }
+    if (!s.asOf) out.push('数据截止日');
+    if (!s.version) out.push('模型版本');
+    if (!s.updated) out.push('最近更新日');
+    /* reviewedBy 不算缺口：没有第三方复核时，如实留空比填自己更可信 */
+    const d = Prov.derive(model);
+    if (!d.currencies.length) out.push('币种（unit 字段里认不出来）');
+    if (!d.scales.length) out.push('量级（unit 字段里认不出来）');
+    return out;
+  };
+
+  /** 给 UI 用的一行摘要。 */
+  Prov.summary = function (model) {
+    const d = Prov.derive(model);
+    const bits = [];
+    if (d.currencies.length) bits.push(d.currencies.join(' / '));
+    if (d.scales.length) bits.push('以' + d.scales.join(' / ') + '为单位');
+    if (d.fiscalFrom) {
+      bits.push(d.fiscalFrom === d.fiscalTo ? String(d.fiscalFrom) : d.fiscalFrom + '–' + d.fiscalTo);
+    }
+    if (d.fiscalBasis) bits.push(d.fiscalBasis);
+    if (d.hasEstimate) bits.push('含预测期');
+    return bits.join(' · ');
+  };
+
+  global.Prov = Prov;
 })(window);
 </script>
 <script>
@@ -1546,6 +2044,44 @@ window.FML_CONFIG = {
       return out;
     }
 
+    /* ---------- 0.5 数对了，但不是算出来的 ----------
+       这两种情况下面的值层面诊断全都不适用（值本来就是对的），直接返回。 */
+    if (c.verdict === 'const') {
+      push('这一格是写死的，不是算出来的',
+        '数字确实等于参考答案，但你把它直接敲进去了，没有引用任何单元格。' +
+        '把上游数据换一组，这一格不会跟着变——那就不是模型，是一张截图。' +
+        '模型的价值就在于改一个假设、全表跟着动。请改成从上游格子推出来的公式。');
+      return out;
+    }
+    if (c.verdict === 'nonequiv') {
+      push('结果对，但公式和参考答案不等价',
+        '在当前这组数据下你算出了正确的数，但把上游数据换一组，你的公式给出 ' +
+        (isNum(c.yourVal) ? fmtNum(c.yourVal) : '算不出来') +
+        '，参考答案给出 ' + (isNum(c.refVal) ? fmtNum(c.refVal) : '—') + '。' +
+        '说明这个数是当前数据下的巧合——比如误用了某个碰巧相等的科目，' +
+        '或者少乘了一个当前恰好等于 1 的系数。检查一下这一格到底引用了哪几个格子。');
+      return out;
+    }
+
+    /* ---------- 0.8 出界：这个数在业务上就不可能 ----------
+       排在值层面诊断之前，因为它比「你的结果是参考答案的 2 倍」更根本：
+       那些诊断在告诉你算错了哪一步，这一条在告诉你这个数根本不成立。 */
+    const bd = c.bounds;
+    if (bd && isNum(u)) {
+      const lo = (bd[0] === null || bd[0] === undefined) ? -Infinity : bd[0];
+      const hi = (bd[1] === null || bd[1] === undefined) ? Infinity : bd[1];
+      if (u < lo || u > hi) {
+        /* 用这一格自己的显示格式写边界。百分比格里说「不能超过 1」会把人绕晕，
+           要说的是「不能超过 100%」——学生看到的就是百分号。 */
+        const f = c.fmtVal || fmtNum;
+        push('这个数超出了它可能的范围',
+          '你算出 ' + f(u) + '，但这一格的取值只可能落在 ' +
+          (lo === -Infinity ? '（无下限）' : f(lo)) + ' 到 ' +
+          (hi === Infinity ? '（无上限）' : f(hi)) + ' 之间。' +
+          (c.boundsNote ? c.boundsNote : '先想清楚这个量的定义，再回头看公式。'));
+      }
+    }
+
     /* ---------- 1. 校验行专属：它不为 0 说明错在上游 ---------- */
     if (/校验|差额|平衡/.test(label) && isNum(s) && Math.abs(s) < 1e-6 && isNum(u) && Math.abs(u) > 1e-6) {
       push('校验没通过，但问题多半不在这一格',
@@ -1676,6 +2212,7 @@ window.FML_CONFIG = {
   'use strict';
 
   const FML = global.FML;
+  const Grade = global.Grade;
 
   const Grid = {};
   let ctx = null;         // 宿主提供的上下文
@@ -1843,8 +2380,8 @@ window.FML_CONFIG = {
   /* ============================================================== 求值显示 */
   Grid.refresh = function () {
     const sh = sheet();
-    const wb = ctx.getWb(), sol = ctx.getSol();
-    wb.reset(); sol.reset();
+    const wb = ctx.getWb();
+    wb.reset();
     const revealed = ctx.revealed || {};
 
     sh.rows.forEach(function (r, ri) {
@@ -1857,7 +2394,7 @@ window.FML_CONFIG = {
         if (!td) continue;
         const disp = td.querySelector('.disp');
         const mark = td.querySelector('.mark');
-        td.classList.remove('err', 'ok', 'bad');
+        td.classList.remove('err', 'ok', 'bad', 'warn');
         if (mark) mark.textContent = '';
         const fmt = cd.fmt || r.fmt;
 
@@ -1871,9 +2408,13 @@ window.FML_CONFIG = {
           disp.textContent = ctx.fmtVal(res.v, fmt);
           td.title = raw;
           if (ctx.showChecks()) {
-            const sr = sol.tryGet(sh.name, c, rowNum);
-            if (sr.ok && near(res.v, sr.v)) { td.classList.add('ok'); if (mark) mark.textContent = '✓'; }
-            else { td.classList.add('bad'); if (mark) mark.textContent = '✕'; }
+            const vd = ctx.getGrader().of(sh.name, c, rowNum);
+            if (vd.ok) { td.classList.add('ok'); if (mark) mark.textContent = '✓'; }
+            else if (vd.code === 'const' || vd.code === 'nonequiv') {
+              /* 数对了，但不是算出来的。跟「算错了」区分开——两者要改的东西完全不同。 */
+              td.classList.add('warn'); if (mark) mark.textContent = '!';
+              td.title = raw + '\n\n' + Grade.label(vd.code);
+            } else { td.classList.add('bad'); if (mark) mark.textContent = '✕'; }
           } else if (revealed[sh.name + '!' + a] && mark) { mark.textContent = '·'; }
         } else {
           const res = wb.tryGet(sh.name, c, rowNum);
@@ -1884,12 +2425,6 @@ window.FML_CONFIG = {
     });
     paintSel();
   };
-
-  function near(a, b) {
-    if (typeof a !== 'number' || typeof b !== 'number') return false;
-    if (!isFinite(a) || !isFinite(b)) return false;
-    return Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 0.002);
-  }
 
   /* ============================================================== 选区 */
   function setSel(c1, r1, c2, r2, keepActive) {
@@ -2406,8 +2941,10 @@ window.FML_CONFIG = {
  * 普通网页里 a[download] 就够了。但这个页面也会以 claude.ai 制品的形式跑在
  * 带 sandbox 的 iframe 里（sandbox="allow-scripts allow-same-origin allow-forms"，
  * 没有 allow-downloads）——那里浏览器会直接拦掉页面自己发起的下载：不报错、
- * 不下载、什么都不发生。宿主为此给了 window.claude.downloads 通道，走它才会
- * 弹出保存确认框。
+ * 不下载、什么都不发生。宿主为此给了一个下载通道，走它才会弹出保存确认框。
+ *
+ * 通道要用 claude.use('downloads') 拿，而且是异步的；拿不到就是 null
+ * （没开这个能力、或压根不在制品里），不要去探测 window.claude 上的成员。
  *
  * 所以：有宿主通道就走宿主通道，没有就退回 a[download]。
  * ==========================================================================*/
@@ -2415,9 +2952,16 @@ window.FML_CONFIG = {
   'use strict';
   const Save = {};
 
+  /* 只解析一次，之后复用。拿不到一律当 null 处理，让调用方走降级分支。 */
+  let hostP = null;
   function host() {
-    const c = global.claude;
-    return (c && c.downloads && typeof c.downloads.save === 'function') ? c.downloads : null;
+    if (!hostP) {
+      const c = global.claude;
+      hostP = (c && typeof c.use === 'function')
+        ? Promise.resolve().then(function () { return c.use('downloads'); }).catch(function () { return null; })
+        : Promise.resolve(null);
+    }
+    return hostP;
   }
 
   /* 是否被嵌在别人的 iframe 里。sandbox 标志没法从内部查询，
@@ -2426,9 +2970,12 @@ window.FML_CONFIG = {
     try { return global.self !== global.top; } catch (e) { return true; }
   }
 
+  /** 返回 Promise<'host' | 'blocked' | 'anchor'>。通道要异步解析，所以这里也是异步的。 */
   Save.channel = function () {
-    if (host()) return 'host';
-    return embedded() ? 'blocked' : 'anchor';
+    return host().then(function (h) {
+      if (h) return 'host';
+      return embedded() ? 'blocked' : 'anchor';
+    });
   };
 
   /* 宿主对扩展名有白名单，.xlsx 不一定在里面。被拒时补一个允许的后缀再存一次
@@ -2459,39 +3006,36 @@ window.FML_CONFIG = {
    * renamed = true 表示宿主不收这个扩展名，已换名保存，需要提示用户改回来。
    */
   Save.file = function (blob, filename) {
-    const h = host();
-    if (h) {
-      /* Blob 会被复制（不像 ArrayBuffer 会被转移），失败后可以直接重试 */
-      return h.save({ filename: filename, data: blob })
-        .then(function () { return { filename: filename, size: blob.size, renamed: false }; })
-        .catch(function (err) {
-          const code = err && err.code;
-          if (code !== 'rejected_extension' && code !== 'extension_not_enabled') throw toError(err);
-          const alt = filename + FALLBACK_EXT;
-          return h.save({ filename: alt, data: blob }).then(function () {
-            return { filename: alt, size: blob.size, renamed: true, original: filename };
-          }).catch(function (e2) { throw toError(e2); });
-        });
-    }
+    return host().then(function (h) {
+      if (h) {
+        /* Blob 会被复制（不像 ArrayBuffer 会被转移），失败后可以直接重试 */
+        return h.save({ filename: filename, data: blob })
+          .then(function () { return { filename: filename, size: blob.size, renamed: false }; })
+          .catch(function (err) {
+            const code = err && err.code;
+            if (code !== 'rejected_extension' && code !== 'extension_not_enabled') throw toError(err);
+            const alt = filename + FALLBACK_EXT;
+            return h.save({ filename: alt, data: blob }).then(function () {
+              return { filename: alt, size: blob.size, renamed: true, original: filename };
+            }).catch(function (e2) { throw toError(e2); });
+          });
+      }
 
-    if (embedded()) {
-      const e = new Error('这个页面被嵌在不允许下载的框架里。请在新标签页单独打开本页，或用本地版本导出。');
-      e.code = 'sandboxed';
-      return Promise.reject(e);
-    }
+      if (embedded()) {
+        const e = new Error('这个页面被嵌在不允许下载的框架里。请在新标签页单独打开本页，或用本地版本导出。');
+        e.code = 'sandboxed';
+        throw e;
+      }
 
-    return new Promise(function (resolve, reject) {
-      try {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.rel = 'noopener';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
-        resolve({ filename: filename, size: blob.size, renamed: false });
-      } catch (err) { reject(err); }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+      return { filename: filename, size: blob.size, renamed: false };
     });
   };
 
@@ -3262,7 +3806,19 @@ window.FML_CONFIG = {
   /** 给定值：真实数据，只读 */
   function G(v, o) { const c = { kind: 'given', v: v }; return o ? Object.assign(c, o) : c; }
 
-  /** 输入格：sol 为参考公式（不带等号也可），tip 为提示 */
+  /**
+   * 输入格：sol 为参考公式（不带等号也可），tip 为提示。
+   *
+   * o.tol      单独放宽这一格的判定容差（默认 1e-6，见 grade.js）——
+   *            只在源数据本身带舍入残差、等价公式也对不齐的时候才用。
+   * o.bounds   [下限, 上限]，任一端可以写 null 表示不限。
+   *            这不是评分标准，是诊断用的：学生填出界了先告诉他「这个数不可能」，
+   *            比只说「和参考答案不一致」有用得多。概率填成 130%、
+   *            税率填成 250% 属于物理上就不成立，不必等他去逐格比对。
+   *            只给「出界即荒谬」的格子加，不要拿它表达「通常在什么区间」——
+   *            那种判断随行业变化很大，做成硬提示一定会误伤。
+   * o.boundsNote  出界时补一句为什么，写给学生看。
+   */
   function I(sol, o) { const c = { kind: 'input', sol: sol }; return o ? Object.assign(c, o) : c; }
 
   /** 只读计算格 */
@@ -3419,6 +3975,36 @@ window.FML_CONFIG = {
       '**终值不是永续增长，是 0**。再加上一个最经典的陷阱：现金流已经按概率折过了，' +
       '折现率就不能再用"生物科技风险高"当理由往上抬，否则同一个风险被扣了两遍。',
     skills: ['分阶段成功率与累计概率', '峰值销售的量价渗透拆解', '专利悬崖与终值为 0', '避免风险双重计算', '管线加总与授权里程碑']
+  });
+
+  add({
+    id: 'insurance', name: '保险公司估值', en: 'Insurance Valuation', icon: '⛨', color: '#4a6fa5',
+    tagline: '综合成本率、内含价值、新业务价值——一套完全独立的口径',
+    desc: '保险是少数几个通用估值方法整个失效的行业。财险的"毛利率"叫综合成本率，' +
+      '越低越好且超过 100% 不代表亏钱；寿险卖一张二十年期保单，当年会计利润接近于零，' +
+      '所以不能用市盈率，要用内含价值 EV 和新业务价值 NBV。' +
+      '而 EV 建立在一长串长期假设上，读它的关键不是看有多大，是看它一年之内怎么变。',
+    skills: ['综合成本率与承保利润', '承保 + 投资双利润来源', 'EV = 调整净资产 + 有效业务价值', 'NBV 与渠道价值率', 'EV 变动分析与 P/EV']
+  });
+
+  add({
+    id: 'realestate', name: '不动产与项目融资', en: 'Real Estate & Project Finance', icon: '⌂', color: '#96703a',
+    tagline: 'NOI 与 Cap Rate 估值、DSCR 与偿债能力、开发项目 IRR',
+    desc: '不动产估值不用 DCF，用直接资本化法：价值 = NOI ÷ Cap Rate。' +
+      '难点在 NOI 的口径（不扣利息、折旧、税与资本开支）和 Cap Rate 的来源（观察值而非计算值）。' +
+      '融到贷款那一步视角要切换：贷款人不看上行只看下行，关心 LTV、DSCR 与债务收益率。' +
+      '而开发项目又是另一套——没有终值，利润是既定的，回报率完全由回款时间决定。',
+    skills: ['NOI 三层结构', '直接资本化法与 Cap Rate 敏感性', 'LTV / DSCR / 债务收益率', '契约测试与压力测试', '开发项目现金流与股权 IRR']
+  });
+
+  add({
+    id: 'credit', name: '信用分析：债权人视角', en: 'Credit Analysis', icon: '⊘', color: '#6b5b95',
+    tagline: '收益封顶、损失不封顶——所以只看下行',
+    desc: '股东的收益无上限，所以看增长；债权人最好的结果只是按时收回本息，' +
+      '所以全部注意力都在"最坏会怎样"。这个不对称决定了信用分析用的是倍数而不是增长率：' +
+      '杠杆倍数、覆盖倍数、契约 headroom。而违约之后还有第二个问题——' +
+      '同一家公司只有一个企业价值，但债务分好几层，你持有哪一层决定了是全额收回还是血本无归。',
+    skills: ['净债务/EBITDA 与覆盖倍数', 'FFO 与债权人现金流口径', '财务契约测试与 headroom', 'EBITDA 加回的操纵空间', '清偿瀑布与回收率', '预期损失 = PD × LGD']
   });
 
   /* ------------------------------------------------------------------
@@ -4681,6 +5267,18 @@ window.FML_CONFIG = {
       { t: '第 5 步：解释', d: '对比服务收入占比与整体毛利率的走势，看它们是不是同向移动。' }
     ],
     dataNote: '数据来源：Apple Inc. FY2022–FY2024 Form 10-K 合并利润表，单位百万美元。',
+    /* source 块的样板，全站目前只有这一个模型填了。
+       这里只结构化了 dataNote 里本来就写着的信息（文件名、期间、报表名）——
+       url、page、asOf 需要对着原文核，没核过就不填，由 verifySource() 报为缺口。
+       币种、量级、财年口径不写在这里：那三项由 provenance.js 从 sheet.unit
+       和表头自动推出来，手写反而会和数据脱节。 */
+    source: {
+      docs: [{
+        title: 'Apple Inc. Form 10-K',
+        period: 'FY2022–FY2024',
+        statement: 'CONSOLIDATED STATEMENTS OF OPERATIONS（合并利润表）'
+      }]
+    },
     takeaways: [
       '服务收入占比从 19.8% 升到 24.6%，是整体毛利率从 43.3% 升到 46.2% 的主要原因——结构变化比经营改善更能解释利润率。',
       'FY2024 营业利润同比 +7.8%，净利润同比 −3.4%，差异全部来自所得税：有效税率从 14.7% 跳到 24.1%，源于欧盟国家援助案一次性计提约 102 亿美元。',
@@ -5908,7 +6506,11 @@ window.FML_CONFIG = {
         R('IRR', [I('=B27^(1/B26)-1')], { fmt: 'pct1', style: 'tot' }),              // 28
         GAP(),                                                                      // 29
         SEC('五、对照：假设 100% 股权出资'),                                        // 30
-        R('期间已偿还的债务 = 债务融资 − 存续债务余额', [I('=B12-B21')]),            // 31
+        R('期间已偿还的债务 = 债务融资 − 存续债务余额', [I('=B12-B21', {
+          bounds: [0, null],
+          boundsNote: '这个模型里没有"期间又借新钱"这个假设，所以已偿还的债务不可能是负数。' +
+            '算出负数说明你把存续债务余额和债务融资金额的位置写反了。'
+        })]),                                                                        // 31
         R('无杠杆股权投入', [I('=B4')]),                                             // 32
         R('无杠杆退出股权价值（资产 + 无需还债而留存的现金）', [I('=B20+B31')]),     // 33
         R('无杠杆 MOIC（倍）', [I('=B33/B32')], { fmt: 'num3' }),                    // 34
@@ -5922,7 +6524,13 @@ window.FML_CONFIG = {
         R('悲观情形 MOIC（含杠杆）', [I('=B41/B25')], { fmt: 'num3' }),              // 42
         R('悲观情形股权价值（无杠杆）', [I('=B40+B31')]),                            // 43
         R('悲观情形 MOIC（无杠杆）', [I('=B43/B32')], { fmt: 'num3' }),              // 44
-        R('下行时杠杆造成的 MOIC 差异（倍）', [I('=B42-B44')], { fmt: 'num3' })      // 45
+        R('下行时杠杆造成的 MOIC 差异（倍）', [I('=B42-B44')], { fmt: 'num3' }),     // 45
+        GAP(),                                                                      // 46
+        SEC('七、结构校验'),                                                        // 47
+        /* 这是本模型唯一的配平校验：出资结构的两块必须正好等于总对价。
+           它是 Sources = Uses 在入门级模型里的最小形态——完整版见 belle-lbo-full
+           的「来源与用途」表。B9 / B10 / B11 / B12 里任何一处写错都会在这里暴露。 */
+        R('校验：股权出资 + 债务融资 − 股权总对价（应为 0）', [I('=B11+B12-B4')], { style: 'tot' }) // 48
       ]
     }]
   });
@@ -12346,7 +12954,7 @@ window.FML_CONFIG = {
           R('NDA → 获批', [G(0.92), G(0.83)], { fmt: 'pct0' }),                                      // 6
           GAP(),                                                                                      // 7
           SEC('二、累计成功率与校验'),                                                               // 8
-          R('从 I 期起最终获批的概率', [I('=B3*B4*B5*B6'), I('=C3*C4*C5*C6')], { fmt: 'pct2', style: 'tot' }), // 9
+          R('从 I 期起最终获批的概率', [I('=B3*B4*B5*B6', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), I('=C3*C4*C5*C6', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' })], { fmt: 'pct2', style: 'tot' }), // 9
           R('公开披露的整体获批率', [G(0.067), G(0.102)], { fmt: 'pct1' }),                          // 10
           R('校验差额（应接近 0）', [I('=B9-B10'), I('=C9-C10')], { fmt: 'num4', style: 'tot' }),    // 11
           R('两个口径的差距', [I('=C9/B9-1'), E()], { fmt: 'pct0', note: '同一个品种，差这么多' }),  // 12
@@ -12357,9 +12965,9 @@ window.FML_CONFIG = {
           R('从提交 NDA 起', [I('=B6'), I('=C6')], { fmt: 'pct1' }),                                 // 17
           GAP(),                                                                                      // 18
           SEC('四、本模型采用近期口径（品种已在 III 期）'),                                         // 19
-          R('III 期成功率', [I('=B5'), E()], { fmt: 'pct0' }),                                       // 20
+          R('III 期成功率', [I('=B5', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), E()], { fmt: 'pct0' }),                                       // 20
           R('NDA → 获批', [I('=B6'), E()], { fmt: 'pct0' }),                                         // 21
-          R('从 III 期起的累计成功率', [I('=B20*B21'), E()], { fmt: 'pct1', style: 'tot' }),         // 22
+          R('从 III 期起的累计成功率', [I('=B20*B21', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), E()], { fmt: 'pct1', style: 'tot' }),         // 22
           R('直觉检验：10 个进 III 期的品种，最终获批', [I('=B22*10'), E()], { fmt: 'num1', note: '个' }) // 23
         ]
       },
@@ -12539,12 +13147,12 @@ window.FML_CONFIG = {
         GAP(),                                                                                     // 26
         SEC('五、盈亏平衡成功率（反推）'),                                                        // 27
         R('要让 rNPV = 0，需要的成功率', [I('=-B10/B11')], { fmt: 'pct1', style: 'tot' }),         // 28
-        R('当前假设的成功率', [I('=B7')], { fmt: 'pct1' }),                                        // 29
+        R('当前假设的成功率', [I('=B7', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' })], { fmt: 'pct1' }),                                        // 29
         R('还差多少（百分点）', [I('=(B28-B29)*100')], { fmt: 'num1', style: 'tot' }),             // 30
         GAP(),                                                                                     // 31
         SEC('六、rNPV 是期望值，不是最可能的结果'),                                               // 32
-        R('成功的概率', [I('=B7')], { fmt: 'pct0' }),                                              // 33
-        R('失败的概率', [I('=1-B7')], { fmt: 'pct0', note: '这才是单次最可能的结果' }),            // 34
+        R('成功的概率', [I('=B7', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' })], { fmt: 'pct0' }),                                              // 33
+        R('失败的概率', [I('=1-B7', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' })], { fmt: 'pct0', note: '这才是单次最可能的结果' }),            // 34
         R('失败时的实际损失（现值）', [I('=B10')], { fmt: 'num2' }),                               // 35
         R('成功时的实际收益（现值）', [I('=B10+B11')], { fmt: 'num2' }),                           // 36
         R('校验：概率加权 − rNPV（应为 0）', [I('=B33*B36+B34*B35-B18')], { fmt: 'num4', style: 'tot' }) // 37
@@ -12619,7 +13227,7 @@ window.FML_CONFIG = {
           R('II 期 → III 期', [G(0.28), G(0.28), E()], { fmt: 'pct0' }),                             // 4
           R('III 期 → 提交 NDA', [G(0.55), G(0.55), G(0.55)], { fmt: 'pct0' }),                      // 5
           R('NDA → 获批', [G(0.92), G(0.92), G(0.92)], { fmt: 'pct0' }),                             // 6
-          R('累计成功率', [I('=B3*B4*B5*B6'), I('=C4*C5*C6'), I('=D5*D6')], { fmt: 'pct2', style: 'tot' }), // 7
+          R('累计成功率', [I('=B3*B4*B5*B6', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), I('=C4*C5*C6', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), I('=D5*D6', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' })], { fmt: 'pct2', style: 'tot' }), // 7
           R('相对品种 C 的倍数', [I('=B7/$D$7'), I('=C7/$D$7'), I('=D7/$D$7')], { fmt: 'pct0', note: '越早期折得越狠' }), // 8
           GAP(),                                                                                      // 9
           SEC('二、成功情形下的现值（教学假设）'),                                                   // 10
@@ -12637,9 +13245,9 @@ window.FML_CONFIG = {
           R('概率调整后剩下', [I('=B19/B21'), E(), E()], { fmt: 'pct1', style: 'tot', note: '九成价值被概率折掉了' }), // 22
           GAP(),                                                                                      // 23
           SEC('五、为什么必须做管线'),                                                                // 24
-          R('三个品种全部失败的概率', [I('=(1-B7)*(1-C7)*(1-D7)'), E(), E()], { fmt: 'pct1', style: 'tot' }), // 25
-          R('至少一个成功的概率', [I('=1-B25'), E(), E()], { fmt: 'pct1', style: 'tot' }),            // 26
-          R('只押品种 C 时成功的概率', [I('=D7'), E(), E()], { fmt: 'pct1' }),                        // 27
+          R('三个品种全部失败的概率', [I('=(1-B7)*(1-C7)*(1-D7)', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), E(), E()], { fmt: 'pct1', style: 'tot' }), // 25
+          R('至少一个成功的概率', [I('=1-B25', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), E(), E()], { fmt: 'pct1', style: 'tot' }),            // 26
+          R('只押品种 C 时成功的概率', [I('=D7', { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' }), E(), E()], { fmt: 'pct1' }),                        // 27
           R('做管线比单押提高了（百分点）', [I('=(B26-B27)*100'), E(), E()], { fmt: 'num1', note: '这就是分散的价值' }) // 28
         ]
       },
@@ -12705,7 +13313,7 @@ window.FML_CONFIG = {
           SEC('四、反推：要多高的成功率才能解释市场定价'),                                            // 16
           R('三品种成功情形现值合计', [I("='三品种管线'!B21")], { fmt: 'num2' }),                      // 17
           R('市场隐含的平均成功率', [I('=B5/B17')], { fmt: 'pct1', style: 'tot' }),                    // 18
-          R('模型采用的加权平均成功率', [I("='三品种管线'!B19/'三品种管线'!B21")], { fmt: 'pct1' }),   // 19
+          R('模型采用的加权平均成功率', [I("='三品种管线'!B19/'三品种管线'!B21", { bounds: [0, 1], boundsNote: '概率不可能为负，也不可能超过 100%。连乘出来的累计成功率一定小于其中任何一个单项成功率——如果你算出的数比某个阶段的成功率还大，多半是把连乘写成了连加。' })], { fmt: 'pct1' }),   // 19
           R('市场比行业统计乐观（倍）', [I('=B18/B19')], { fmt: 'num1', style: 'tot' }),               // 20
           R('隐含成功率是否超过 100%（1 = 是）', [I('=IF(B18>1,1,0)')], { fmt: 'num0', note: '超过 100% 说明差距不可能只用成功率解释' }), // 21
           GAP(),                                                                                      // 22
@@ -12714,6 +13322,1189 @@ window.FML_CONFIG = {
           R('② 管线里还有模型没算进去的品种', [E()], { note: '去查研发进展公告' }),                    // 25
           R('③ 估值包含了对平台能力的定价', [E()], { note: '相信它能持续造出新品种' }),                // 26
           R('搞清是哪一种，比争论"贵不贵"重要', [E()], { note: '这才是管线估值的意义' })                // 27
+        ]
+      }
+    ]
+  });
+})();
+</script>
+<script>
+/* ===== data/ext-01-insurance.js ===== */
+/* ============================================================================
+ * ext-01-insurance.js —— 保险公司估值（新类型 insurance）
+ *   · ins-cor          简单 —— 财险：综合成本率与"承保 + 投资"两个利润来源
+ *   · ins-ev-nbv       中级 —— 寿险：内含价值 EV 与新业务价值 NBV
+ *   · ins-ev-movement  复杂 —— EV 变动分析、敏感性与 P/EV 估值
+ *
+ * 全部数据为教学假设，量级参照上市保险公司的公开披露区间设定，
+ * 但不对应任何一家具体公司的任何一期财报。见每个模型的 dataNote。
+ *
+ * 行号约定：第 1 行是表头，rows[0] 即第 2 行；SEC / GAP 各占一行。
+ * ==========================================================================*/
+(function () {
+  'use strict';
+  const { G, I, E, R, SEC, GAP } = window.S;
+  const add = window.DB.addModel;
+
+  /* ==========================================================================
+   * 1. 财险：综合成本率 —— 简单
+   * ========================================================================*/
+  add({
+    id: 'ins-cor', market: 'secondary', level: 1, type: 'insurance',
+    companyId: null, industryId: null,
+    title: '财险：综合成本率与两个利润来源',
+    subtitle: '保险公司的"毛利率"叫综合成本率，而且它越低越好、超过 100% 就是卖一单亏一单',
+    minutes: 25, tags: ['综合成本率', '赔付率', '费用率', '承保利润', '投资收益'],
+    intro:
+      '保险公司的利润表和制造业完全不是一回事。它没有营业成本，也没有毛利率。' +
+      '**它的"成本"是未来要赔出去的钱，而那笔钱在卖保单的时候还不知道是多少。**\n\n' +
+      '财险用一个指标概括承保这门生意做得好不好：**综合成本率 COR = 赔付率 + 费用率**。\n\n' +
+      '它有两个反直觉的地方：\n\n' +
+      '**第一，它越低越好。** 这和毛利率相反。COR 93% 表示每收 100 元保费，' +
+      '赔付加费用花掉 93 元，承保赚 7 元。\n\n' +
+      '**第二，超过 100% 不等于亏钱。** 因为保费是先收后赔，中间这笔钱可以拿去投资。' +
+      '很多财险公司常年承保微亏，靠投资收益赚钱——这在别的行业里不成立，' +
+      '但在保险业是一种正常的商业模式。\n\n' +
+      '这个模型三年数据，COR 从 93% 一路走到 101%。做完你要能回答：' +
+      '第三年承保亏了，公司整体还赚不赚钱？亏的那部分要投资端赚回几倍才能补上？',
+    objectives: [
+      '掌握赔付率、费用率、综合成本率的定义与计算',
+      '理解 COR 越低越好，且 COR > 100% 只代表承保亏损、不代表公司亏损',
+      '会把税前利润拆成承保利润与投资收益两块，并判断哪块是主力',
+      '理解保险的"负债先收后付"结构为什么让投资收益成为利润的一部分',
+      '能看出承保恶化是来自赔付端还是费用端'
+    ],
+    steps: [
+      { t: '第 1 步：算三个率', d: '第 9–11 行。赔付率 = 赔付 ÷ 已赚保费；费用率 =（手续费 + 管理费）÷ 已赚保费；两者相加就是 COR。' },
+      { t: '第 2 步：算承保利润', d: '第 14 行。承保利润 = 已赚保费 ×（1 − COR）。COR 超过 100% 时这个数会是负的，这正常。' },
+      { t: '第 3 步：加上投资', d: '第 15–18 行。投资资产 × 投资收益率 = 投资收益，加上承保利润才是税前利润。' },
+      { t: '第 4 步：看结构', d: '第 21–23 行。承保占税前利润多少？第三年承保亏损，投资要赚回几倍才补得上？' },
+      { t: '第 5 步：找恶化的来源', d: '回头对比第 9 行和第 10 行三年的走势。COR 涨了 8 个百分点，赔付端和费用端各贡献了多少？' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一家保险公司的实际财报。\n' +
+      '保费规模、赔付率与费用率的量级参照 A 股上市财险公司近年披露的常见区间设定' +
+      '（COR 多在 95%–101%、投资收益率多在 3.5%–5%），用于演示指标口径与利润结构，' +
+      '不可用于任何投资判断。单位：百万元人民币。',
+    takeaways: [
+      'COR 从 93% 升到 101%，八个百分点里赔付率贡献 5 个、费用率贡献 3 个——**恶化主要在赔付端**，那通常意味着定价不足或风险选择变差，比费用超支更难修复。',
+      '第三年承保亏损 528，但税前利润仍有 4,488——**承保亏损被投资收益完全覆盖**。这就是为什么读财险报表不能只看 COR，也不能只看净利润。',
+      '承保利润占税前利润的比重从 38% 掉到 −12%。**公司越来越依赖投资端**，而投资收益的波动性远高于承保端，利润质量其实在下降。'
+    ],
+    sheets: [{
+      name: '承保盈利拆解',
+      unit: '百万元人民币',
+      header: ['项目', '2022', '2023', '2024'],
+      rows: [
+        SEC('一、保费与成本（教学假设）'),                                                        // 2
+        R('已赚保费', [G(42000), G(48000), G(52800)], { style: 'tot' }),                          // 3
+        R('赔付支出', [G(26040), G(30720), G(35376)]),                                            // 4
+        R('手续费及佣金', [G(5460), G(6240), G(7392)]),                                           // 5
+        R('业务及管理费', [G(7560), G(8160), G(10560)]),                                          // 6
+        GAP(),                                                                                    // 7
+        SEC('二、三个率（需要你计算）'),                                                          // 8
+        R('赔付率', [I('=B4/B3'), I('=C4/C3'), I('=D4/D3')], { fmt: 'pct1' }),                    // 9
+        R('费用率', [I('=(B5+B6)/B3'), I('=(C5+C6)/C3'), I('=(D5+D6)/D3')], { fmt: 'pct1' }),     // 10
+        R('综合成本率 COR', [I('=B9+B10'), I('=C9+C10'), I('=D9+D10')], { fmt: 'pct1', style: 'tot' }), // 11
+        GAP(),                                                                                    // 12
+        SEC('三、承保利润与投资收益'),                                                            // 13
+        R('承保利润 = 已赚保费 ×（1 − COR）', [I('=B3*(1-B11)'), I('=C3*(1-C11)'), I('=D3*(1-D11)')], { style: 'tot' }), // 14
+        R('投资资产', [G(105000), G(120000), G(132000)], { note: '教学假设' }),                   // 15
+        R('总投资收益率', [G(0.045), G(0.042), G(0.038)], { fmt: 'pct1', note: '教学假设' }),     // 16
+        R('投资收益', [I('=B15*B16'), I('=C15*C16'), I('=D15*D16')]),                             // 17
+        R('税前利润 = 承保利润 + 投资收益', [I('=B14+B17'), I('=C14+C17'), I('=D14+D17')], { style: 'tot' }), // 18
+        GAP(),                                                                                    // 19
+        SEC('四、这门生意到底靠什么赚钱'),                                                        // 20
+        R('承保利润占税前利润', [I('=B14/B18'), I('=C14/C18'), I('=D14/D18')], { fmt: 'pct1' }),  // 21
+        R('COR 是否超过 100%（1 = 是）', [
+          I('=IF(B11>1,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。算出别的数说明你没有用 IF，而是直接把 COR 减了 1。' }),
+          I('=IF(C11>1,1,0)', { bounds: [0, 1] }),
+          I('=IF(D11>1,1,0)', { bounds: [0, 1] })
+        ], { fmt: 'num0' }),                                                                      // 22
+        R('承保每亏 1 元，投资要赚回几元（承保盈利时记 0）', [
+          I('=IF(B14<0,-B17/B14,0)'), I('=IF(C14<0,-C17/C14,0)'), I('=IF(D14<0,-D17/D14,0)')
+        ], { fmt: 'num2' }),                                                                      // 23
+        GAP(),                                                                                    // 24
+        SEC('五、校验'),                                                                          // 25
+        R('校验：保费 − 赔付 − 手续费 − 管理费 − 承保利润（应为 0）',
+          [I('=B3-B4-B5-B6-B14'), I('=C3-C4-C5-C6-C14'), I('=D3-D4-D5-D6-D14')], { style: 'tot' }) // 26
+      ]
+    }]
+  });
+
+  /* ==========================================================================
+   * 2. 寿险：内含价值与新业务价值 —— 中级
+   * ========================================================================*/
+  add({
+    id: 'ins-ev-nbv', market: 'secondary', level: 2, type: 'insurance',
+    companyId: null, industryId: null,
+    title: '寿险：内含价值 EV 与新业务价值 NBV',
+    subtitle: '寿险不能用市盈率估值——一张保单卖出去，利润要在未来二十年里慢慢释放',
+    minutes: 40, tags: ['内含价值', 'EV', 'NBV', '新业务价值率', 'P/EV', '渠道结构'],
+    intro:
+      '寿险公司是全市场最不能用市盈率估值的行业，原因很简单：' +
+      '**卖出一张二十年期的保单，当年的会计利润几乎为零，甚至是负的**' +
+      '（首年佣金和获客成本要立刻花掉），而这张保单未来二十年会持续产生利润。\n\n' +
+      '所以行业发明了一套自己的口径：\n\n' +
+      '**内含价值 EV = 调整净资产 ANW + 有效业务价值 VIF**\n\n' +
+      '前者是"现在账上有多少净资产"，后者是"已经卖出去的存量保单，未来利润的折现值"。' +
+      'EV 回答的是**清算问题**：如果从今天起一张新保单都不卖，这家公司值多少钱。\n\n' +
+      '而**新业务价值 NBV** 回答的是**成长问题**：今年新卖的保单，创造了多少价值。' +
+      'NBV = 首年保费 × 新业务价值率，后者随渠道差异极大——' +
+      '个险的价值率可以是银保的五倍以上。\n\n' +
+      '这个模型最重要的一步在第 2 张表第三节：' +
+      '**首年保费一分钱没少，只是渠道结构变了，NBV 掉了近 20%。** ' +
+      '理解这一步，你就明白为什么寿险公司的业绩发布会上，' +
+      '管理层反复讲"价值转型"而不是"保费增长"。',
+    objectives: [
+      '掌握 EV = 调整净资产 + 有效业务价值 的构成，理解偿付能力成本为什么是减项',
+      '理解 EV 回答的是清算问题、NBV 回答的是成长问题，两者不可互相替代',
+      '会按渠道计算新业务价值，并算出加权平均新业务价值率',
+      '能定量说明渠道结构变化对 NBV 的影响（保费不变、价值大跌）',
+      '掌握 P/EV 的计算与解读，会反推市场对存量业务给了多大折价'
+    ],
+    steps: [
+      { t: '第 1 步：算调整净资产', d: '第 1 张表第 3–5 行。账面股东权益加上净资产的公允价值调整。' },
+      { t: '第 2 步：算有效业务价值', d: '第 8–10 行。未来税后利润现值减去持有偿付能力额度的成本——那笔资本被锁住不能分红，是有代价的。' },
+      { t: '第 3 步：加总得 EV', d: '第 13 行，再用第 22 行校验。' },
+      { t: '第 4 步：算 P/EV', d: '第 16–19 行。市值除以 EV。低于 1 意味着市场认为存量保单的利润拿不到账面这么多。' },
+      { t: '第 5 步：分渠道算 NBV', d: '第 2 张表第 3–6 行。每个渠道的首年保费乘各自的价值率，再加总。注意合计行的价值率是倒算出来的加权平均，不是三个率的简单平均。' },
+      { t: '第 6 步：看结构', d: '第 9–12 行。银保贡献了一半以上的保费，却只贡献两成的价值。' },
+      { t: '第 7 步：做情景', d: '第 15–20 行。保费总量一分不变，银保占比升到 65%，看 NBV 掉多少。这一步是整个模型的重点。' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一家保险公司的实际披露。\n' +
+      'EV 构成、渠道结构与各渠道新业务价值率的量级参照 A 股上市寿险公司近年' +
+      '内含价值报告的常见区间设定（个险新业务价值率显著高于银保是行业普遍现象），' +
+      '用于演示 EV / NBV 的口径与结构效应，不可用于任何投资判断。单位：百万元人民币。',
+    takeaways: [
+      '银保渠道贡献 53% 的首年保费，却只贡献 20% 的新业务价值；个险贡献 35% 的保费，贡献 72% 的价值。**在寿险里，"保费规模"和"价值创造"是两个几乎独立的指标。**',
+      '情景测试里首年保费总额一分钱没变，仅仅把银保占比从 53% 提到 65%，NBV 就从 12,380 掉到 9,949，**降幅 19.6%**。这就是"价值转型"四个字的全部含义。',
+      'P/EV 只有 0.80，意味着市场给存量有效业务打了约 37% 的折价。这通常反映两件事：**对长期投资回报假设的怀疑**，以及**对退保率、费用率等营运假设的怀疑**——EV 是一个建立在一长串假设上的数字，市场有权不认。'
+    ],
+    sheets: [
+      {
+        name: '内含价值构成',
+        unit: '百万元人民币',
+        header: ['项目', '金额'],
+        rows: [
+          SEC('一、调整净资产 ANW'),                                                     // 2
+          R('股东权益（账面）', [G(180000)]),                                            // 3
+          R('净资产公允价值调整', [G(12000)], { note: '教学假设：可供出售金融资产等的浮盈' }), // 4
+          R('调整净资产 ANW', [I('=B3+B4')], { style: 'tot' }),                          // 5
+          GAP(),                                                                         // 6
+          SEC('二、有效业务价值 VIF'),                                                   // 7
+          R('有效业务未来税后利润现值', [G(260000)], { note: '存量保单，按风险贴现率折现' }), // 8
+          R('持有偿付能力额度的成本', [G(-28000)], { note: '这笔资本被锁住不能分红，是减项' }), // 9
+          R('有效业务价值 VIF', [I('=B8+B9')], { style: 'tot' }),                        // 10
+          GAP(),                                                                         // 11
+          SEC('三、内含价值 EV'),                                                        // 12
+          R('内含价值 EV = ANW + VIF', [I('=B5+B10')], { style: 'tot' }),                // 13
+          GAP(),                                                                         // 14
+          SEC('四、市场怎么给它定价'),                                                   // 15
+          R('总市值', [G(339200)], { note: '教学假设' }),                                // 16
+          R('P/EV', [I('=B16/B13')], { fmt: 'num2', style: 'tot' }),                     // 17
+          R('市值相对 EV 的折价', [I('=1-B17')], { fmt: 'pct1' }),                       // 18
+          R('折价全部归给存量业务时，VIF 被打了几折', [I('=(B13-B16)/B10')], { fmt: 'pct1' }), // 19
+          GAP(),                                                                         // 20
+          SEC('五、校验'),                                                               // 21
+          R('校验：ANW + VIF − EV（应为 0）', [I('=B5+B10-B13')], { style: 'tot' })      // 22
+        ]
+      },
+      {
+        name: '新业务价值 NBV',
+        unit: '百万元人民币',
+        header: ['渠道', '首年保费 FYP', '新业务价值率', '新业务价值 NBV'],
+        rows: [
+          SEC('一、分渠道计算'),                                                          // 2
+          R('个人代理（个险）', [G(28000), G(0.32, { fmt: 'pct0' }), I('=B3*C3')]),       // 3
+          R('银行保险（银保）', [G(42000), G(0.06, { fmt: 'pct0' }), I('=B4*C4')]),       // 4
+          R('团体保险（团险）', [G(9000), G(0.10, { fmt: 'pct0' }), I('=B5*C5')]),        // 5
+          R('合计', [I('=SUM(B3:B5)'), I('=D6/B6', { fmt: 'pct2' }), I('=SUM(D3:D5)')], { style: 'tot' }), // 6
+          GAP(),                                                                          // 7
+          SEC('二、为什么不能只看保费规模'),                                              // 8
+          R('个险占首年保费', [I('=B3/$B$6'), E(), E()], { fmt: 'pct1' }),                // 9
+          R('个险占新业务价值', [I('=D3/$D$6'), E(), E()], { fmt: 'pct1' }),              // 10
+          R('银保占首年保费', [I('=B4/$B$6'), E(), E()], { fmt: 'pct1' }),                // 11
+          R('银保占新业务价值', [I('=D4/$D$6'), E(), E()], { fmt: 'pct1' }),              // 12
+          GAP(),                                                                          // 13
+          SEC('三、情景：保费总量不变，银保占比升到 65%'),                                // 14
+          R('情景假设：银保占首年保费比重', [G(0.65, { fmt: 'pct0' }), E(), E()]),        // 15
+          R('情景下银保 FYP', [I('=$B$6*B15'), E(), E()]),                                // 16
+          R('情景下个险 FYP（团险规模不变）', [I('=$B$6-B16-B5'), E(), E()]),             // 17
+          R('情景下 NBV', [I('=B17*C3+B16*C4+B5*C5'), E(), E()], { style: 'tot' }),       // 18
+          R('NBV 变动额', [I('=B18-D6'), E(), E()]),                                      // 19
+          R('NBV 变动幅度', [I('=B19/D6'), E(), E()], { fmt: 'pct1' }),                   // 20
+          GAP(),                                                                          // 21
+          SEC('四、校验'),                                                                // 22
+          R('校验：三个渠道 NBV 之和 − 合计（应为 0）', [I('=D3+D4+D5-D6'), E(), E()], { style: 'tot' }), // 23
+          R('校验：情景下三个渠道 FYP 之和 − 总量（应为 0）', [I('=B17+B16+B5-$B$6'), E(), E()], { style: 'tot' }) // 24
+        ]
+      }
+    ]
+  });
+
+  /* ==========================================================================
+   * 3. EV 变动分析、敏感性与估值 —— 复杂
+   * ========================================================================*/
+  add({
+    id: 'ins-ev-movement', market: 'secondary', level: 3, type: 'insurance',
+    companyId: null, industryId: null,
+    title: '寿险：内含价值变动分析与 P/EV 估值',
+    subtitle: '期初 EV 到期末 EV 之间有六项，只有两项是可重复的——这决定了 EV 增长该不该被相信',
+    minutes: 55, tags: ['EV 变动分析', '营运偏差', '投资偏差', '假设变动', 'EV 敏感性', '隐含新业务倍数'],
+    intro:
+      '上一个模型算出了一个静态的 EV。但 EV 真正的用法不是看它有多大，' +
+      '而是**看它一年之内怎么变的**——因为 EV 是一个建立在长长一串假设上的数字，' +
+      '而假设每年都要和现实对一次账。\n\n' +
+      '标准的 EV 变动分析把期初到期末拆成六项：\n\n' +
+      '**① 预期回报** —— 时间过去一年，未来利润的折现少折了一年，自然解锁的价值。\n' +
+      '**② 新业务价值 NBV** —— 今年新卖的保单贡献。\n' +
+      '**③ 营运偏差** —— 退保率、费用率、死亡率和假设的差异。\n' +
+      '**④ 投资回报偏差** —— 实际投资收益与长期假设的差异。\n' +
+      '**⑤ 经济假设变动** —— 直接改长期投资回报率或风险贴现率假设。\n' +
+      '**⑥ 股东股息与资本变动。**\n\n' +
+      '关键在于：**只有 ① 和 ② 是可重复的。** ③④⑤ 本质上是"上一版假设错了，现在改回来"，' +
+      '它们既可能是正的也可能是负的，不能外推。\n\n' +
+      '这个模型里，公司的期末 EV 比期初还低了 2.2%。但把不可重复的三项剥掉，' +
+      '底层的价值创造其实是 **+8.6%**。这两个数字相差 10.8 个百分点——' +
+      '**看哪一个，决定了你对这家公司的判断完全相反。**\n\n' +
+      '第 2 张表做敏感性，你会发现投资回报率假设的杀伤力是风险贴现率的两倍多。' +
+      '第 3 张表算隐含新业务倍数，会算出一个负数——市场在说：**新业务不值钱，甚至是负价值。**',
+    objectives: [
+      '掌握 EV 变动分析的六个组成部分，并能说清每一项的经济含义',
+      '能区分可重复项（预期回报 + NBV）与不可重复项（三类偏差与假设变动）',
+      '会计算剥离偏差后的"底层 EV 增长率"，并解释它和报表 EV 增长的差异',
+      '掌握 EV 与 NBV 对投资回报率、风险贴现率两个关键假设的敏感性，并判断哪个更要命',
+      '会计算隐含新业务倍数 =（市值 − EV）÷ NBV，并解读它为负数时市场在说什么'
+    ],
+    steps: [
+      { t: '第 1 步：搭变动表', d: '第 1 张表第 10 行。期初 EV 加上六项得期末 EV，第 21 行校验应为 0。' },
+      { t: '第 2 步：算各项占比', d: 'C 列。每一项除以期初 EV，用 $ 锁住 $B$3。' },
+      { t: '第 3 步：分开可重复与不可重复', d: '第 14–15 行。预期回报 + NBV 是一类，三项偏差与假设变动是另一类。' },
+      { t: '第 4 步：算底层增长', d: '第 16–18 行。假设没有偏差和假设变动，EV 会长多少？和实际差几个百分点？' },
+      { t: '第 5 步：做敏感性', d: '第 2 张表。两个关键假设各 ±50bp，分别看对 EV 和对 NBV 的影响。注意 NBV 对假设远比 EV 敏感。' },
+      { t: '第 6 步：比较杀伤力', d: '第 19–21 行。投资回报率的摆动是风险贴现率的几倍？' },
+      { t: '第 7 步：算隐含新业务倍数', d: '第 3 张表第 8 行。（市值 − EV）÷ NBV。这个数是负的，第 9 行标记出来。' },
+      { t: '第 8 步：解读那个负数', d: '第 12–15 行。折价相当于几年的 NBV？想清楚市场在质疑什么。' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一家保险公司的实际内含价值报告。\n' +
+      'EV 变动各项的量级与符号参照 A 股上市寿险公司近年内含价值报告中常见的情形设定' +
+      '（投资回报偏差为负、下调长期投资回报率假设，是近年行业普遍出现的情况），' +
+      '敏感性系数亦为假设值。用于演示 EV 变动分析的方法与解读，不可用于任何投资判断。\n' +
+      '单位：百万元人民币。期初 EV 与一年 NBV 与本站「寿险：内含价值 EV 与新业务价值 NBV」一致。',
+    takeaways: [
+      '报表上 EV 下降 2.2%，剥掉投资偏差与假设变动后底层增长是 +8.6%，**相差 10.8 个百分点**。前者反映"这一年发生了什么"，后者反映"这门生意本身的造血能力"——两个都要看，但不能混为一谈。',
+      'EV 对投资回报率 ±50bp 的摆动是对风险贴现率 ±50bp 的 **2.3 倍**。原因是寿险资产久期长、利差是主要利润来源，投资回报率假设直接决定了未来利润的高度。同一个假设变动对 NBV 的相对影响又是对 EV 的 **1.3 倍**——新业务久期比存量更长。**利率下行对寿险的杀伤，在 NBV 上先显形。**',
+      '隐含新业务倍数是 **−6.1 倍**：市值比 EV 还低 75,540，相当于 6.1 年的 NBV。市场不只是不给新业务估值，而是在说"继续卖这些保单是在毁灭价值"。这可能对、也可能错，但**它是一个可以被证伪的判断**——盯着后续几期的营运偏差就能验证。'
+    ],
+    sheets: [
+      {
+        name: 'EV 变动分析',
+        unit: '百万元人民币',
+        header: ['项目', '金额', '占期初 EV'],
+        rows: [
+          SEC('一、从期初 EV 到期末 EV'),                                                            // 2
+          R('期初内含价值 EV', [G(424000), E()], { style: 'tot' }),                                   // 3
+          R('① 内含价值预期回报', [G(38160), I('=B4/$B$3', { fmt: 'pct1' })], { note: '时间价值的自然释放' }), // 4
+          R('② 一年新业务价值 NBV', [G(12380), I('=B5/$B$3', { fmt: 'pct1' })]),                     // 5
+          R('③ 营运偏差', [G(-3200), I('=B6/$B$3', { fmt: 'pct1' })], { note: '退保、费用、死亡率与假设的差异' }), // 6
+          R('④ 投资回报偏差', [G(-18600), I('=B7/$B$3', { fmt: 'pct1' })], { note: '实际投资收益低于长期假设' }), // 7
+          R('⑤ 经济假设变动', [G(-24000), I('=B8/$B$3', { fmt: 'pct1' })], { note: '下调长期投资回报率假设' }), // 8
+          R('⑥ 股东股息与资本变动', [G(-14000), I('=B9/$B$3', { fmt: 'pct1' })]),                    // 9
+          R('期末内含价值 EV', [I('=B3+B4+B5+B6+B7+B8+B9'), I('=B10/$B$3', { fmt: 'pct1' })], { style: 'tot' }), // 10
+          R('EV 增长率', [I('=B10/B3-1'), E()], { fmt: 'pct1' }),                                     // 11
+          GAP(),                                                                                      // 12
+          SEC('二、哪些能重复，哪些不能'),                                                            // 13
+          R('可重复部分（① 预期回报 + ② NBV）', [I('=B4+B5'), I('=B14/$B$3', { fmt: 'pct1' })], { style: 'tot' }), // 14
+          R('不可重复部分（③ + ④ + ⑤ 偏差与假设变动）', [I('=B6+B7+B8'), I('=B15/$B$3', { fmt: 'pct1' })], { style: 'tot' }), // 15
+          R('若没有偏差与假设变动，期末 EV 会是', [I('=B3+B4+B5+B9'), E()]),                          // 16
+          R('那样的 EV 增长率会是', [I('=B16/B3-1'), E()], { fmt: 'pct1' }),                          // 17
+          R('两者相差（百分点）', [I('=(B17-B11)*100'), E()], { fmt: 'num1' }),                       // 18
+          GAP(),                                                                                      // 19
+          SEC('三、校验'),                                                                            // 20
+          R('校验：期初 + 六项 − 期末（应为 0）', [I('=B3+B4+B5+B6+B7+B8+B9-B10'), E()], { style: 'tot' }), // 21
+          R('校验：可重复 + 不可重复 + 股息 −（期末 − 期初）（应为 0）', [I('=B14+B15+B9-(B10-B3)'), E()], { style: 'tot' }) // 22
+        ]
+      },
+      {
+        name: '关键假设敏感性',
+        unit: '百万元人民币',
+        header: ['项目', '对 EV 的影响', '对 NBV 的影响'],
+        rows: [
+          SEC('一、基准'),                                                                            // 2
+          R('基准 EV（引自第 1 张表期末）', [I("='EV 变动分析'!B10"), E()], { style: 'tot' }),        // 3
+          R('基准 NBV（引自第 1 张表）', [I("='EV 变动分析'!B5"), E()], { style: 'tot' }),            // 4
+          GAP(),                                                                                      // 5
+          SEC('二、长期投资回报率假设 ±50bp（敏感系数为教学假设）'),                                  // 6
+          R('+50bp 时的变动比例', [G(0.048, { fmt: 'pct1' }), G(0.061, { fmt: 'pct1' })]),            // 7
+          R('+50bp 时的 EV / NBV', [I('=$B$3*(1+B7)'), I('=$B$4*(1+C7)')]),                           // 8
+          R('−50bp 时的变动比例', [G(-0.050, { fmt: 'pct1' }), G(-0.064, { fmt: 'pct1' })]),          // 9
+          R('−50bp 时的 EV / NBV', [I('=$B$3*(1+B9)'), I('=$B$4*(1+C9)')]),                           // 10
+          GAP(),                                                                                      // 11
+          SEC('三、风险贴现率假设 ±50bp（敏感系数为教学假设）'),                                      // 12
+          R('+50bp 时的变动比例', [G(-0.021, { fmt: 'pct1' }), G(-0.037, { fmt: 'pct1' })]),          // 13
+          R('+50bp 时的 EV / NBV', [I('=$B$3*(1+B13)'), I('=$B$4*(1+C13)')]),                         // 14
+          R('−50bp 时的变动比例', [G(0.022, { fmt: 'pct1' }), G(0.039, { fmt: 'pct1' })]),            // 15
+          R('−50bp 时的 EV / NBV', [I('=$B$3*(1+B15)'), I('=$B$4*(1+C15)')]),                         // 16
+          GAP(),                                                                                      // 17
+          SEC('四、哪个假设更要命'),                                                                  // 18
+          R('投资回报率 ±50bp 造成的 EV 摆动', [I('=B8-B10'), E()], { style: 'tot' }),                // 19
+          R('风险贴现率 ±50bp 造成的 EV 摆动', [I('=B16-B14'), E()], { style: 'tot' }),               // 20
+          R('前者是后者的几倍', [I('=B19/B20'), E()], { fmt: 'num2' }),                               // 21
+          R('投资回报率 ±50bp 造成的 NBV 摆动占基准 NBV', [I('=(C8-C10)/$B$4'), E()], { fmt: 'pct1' }), // 22
+          R('投资回报率 ±50bp 造成的 EV 摆动占基准 EV', [I('=B19/$B$3'), E()], { fmt: 'pct1' }),      // 23
+          R('NBV 的敏感度是 EV 的几倍', [I('=B22/B23'), E()], { fmt: 'num2' })                        // 24
+        ]
+      },
+      {
+        name: 'P/EV 与隐含新业务倍数',
+        unit: '百万元人民币',
+        header: ['项目', '金额'],
+        rows: [
+          SEC('一、市场定价'),                                                                        // 2
+          R('总市值', [G(339200)], { note: '教学假设' }),                                             // 3
+          R('期末 EV（引自第 1 张表）', [I("='EV 变动分析'!B10")]),                                   // 4
+          R('P/EV', [I('=B3/B4')], { fmt: 'num2', style: 'tot' }),                                    // 5
+          R('市值 − EV（市场对新业务的定价）', [I('=B3-B4')], { style: 'tot' }),                      // 6
+          R('一年 NBV（引自第 1 张表）', [I("='EV 变动分析'!B5")]),                                   // 7
+          R('隐含新业务倍数 =（市值 − EV）÷ NBV', [I('=B6/B7')], { fmt: 'num1', style: 'tot' }),      // 8
+          R('隐含新业务倍数是否为负（1 = 是）', [
+            I('=IF(B8<0,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' })
+          ], { fmt: 'num0' }),                                                                        // 9
+          GAP(),                                                                                      // 10
+          SEC('二、这个负数意味着什么'),                                                              // 11
+          R('若市场完全认可 EV，市值应为', [I('=B4')]),                                               // 12
+          R('实际市值低了多少', [I('=B4-B3')]),                                                       // 13
+          R('折价幅度', [I('=B13/B4')], { fmt: 'pct1' }),                                             // 14
+          R('折价相当于几年的 NBV', [I('=B13/B7')], { fmt: 'num1' }),                                 // 15
+          GAP(),                                                                                      // 16
+          SEC('三、校验'),                                                                            // 17
+          R('校验：隐含倍数 × NBV + EV − 市值（应为 0）', [I('=B8*B7+B4-B3')], { style: 'tot' })      // 18
+        ]
+      }
+    ]
+  });
+})();
+</script>
+<script>
+/* ===== data/ext-02-realestate.js ===== */
+/* ============================================================================
+ * ext-02-realestate.js —— 地产与项目融资（新类型 realestate）
+ *   · re-noi-cap   简单 —— 单栋物业：NOI 与资本化率估值
+ *   · re-dscr      中级 —— 经营性物业贷：LTV / DSCR / 债务收益率与压力测试
+ *   · re-dev-irr   复杂 —— 开发项目：分期现金流、无杠杆与有杠杆 IRR
+ *
+ * 全部数据为教学假设。租金、Cap Rate、利率与成本的量级参照公开市场的常见区间，
+ * 但不对应任何一个具体项目。见每个模型的 dataNote。
+ *
+ * 行号约定：第 1 行是表头，rows[0] 即第 2 行；SEC / GAP 各占一行。
+ * ==========================================================================*/
+(function () {
+  'use strict';
+  const { G, I, E, R, SEC, GAP } = window.S;
+  const add = window.DB.addModel;
+
+  /* ==========================================================================
+   * 1. NOI 与资本化率 —— 简单
+   * ========================================================================*/
+  add({
+    id: 're-noi-cap', market: 'primary', level: 1, type: 'realestate',
+    companyId: null, industryId: null,
+    title: '写字楼：NOI 与资本化率估值',
+    subtitle: '不动产估值只有一个公式：价值 = NOI ÷ Cap Rate。难的是 NOI 怎么算、Cap Rate 凭什么取',
+    minutes: 30, tags: ['NOI', 'Cap Rate', '有效毛收入', '空置率', '不动产估值'],
+    intro:
+      '不动产估值的主流方法不是 DCF，而是**直接资本化法**，公式简单到只有一行：\n\n' +
+      '**物业价值 = 净运营收入 NOI ÷ 资本化率 Cap Rate**\n\n' +
+      '它其实就是永续年金：假设物业每年产生一笔稳定的 NOI，Cap Rate 是买家要求的回报率。' +
+      'Cap Rate 5% 相当于 20 倍 NOI，跟股票的市盈率是同一个东西的倒数。\n\n' +
+      '难点全在两头：\n\n' +
+      '**NOI 的口径。** 它是运营层面的收入减支出，**不扣利息、不扣折旧、不扣所得税、不扣资本性支出**。' +
+      '扣了利息就变成了股权口径，不同融资结构的物业就没法比了——' +
+      'NOI 之所以是这个口径，就是为了让资产本身的赚钱能力和它怎么融资分开。\n\n' +
+      '**Cap Rate 的取值。** 它不是算出来的，是从市场可比成交里观察出来的。' +
+      '这个模型最后一节会让你看到：**Cap Rate 变动 50bp，估值摆动接近两成**。' +
+      '一个观察值的微小差异，比你在收入端抠半天的影响大得多。\n\n' +
+      '另外注意第 5 行的单位换算——面积用平方米、租金用元/㎡/月、金额用万元，' +
+      '这是不动产模型里最高频的低级错误来源。',
+    objectives: [
+      '掌握潜在毛收入 → 有效毛收入 → NOI 的三层结构',
+      '理解 NOI 为什么不扣利息、折旧、所得税与资本开支',
+      '掌握直接资本化法：价值 = NOI ÷ Cap Rate，并理解它就是永续年金',
+      '会做面积 × 单价 × 月数的单位换算，不出量级错误',
+      '能定量说明 Cap Rate ±50bp 对估值的影响，并理解为什么它比收入端假设更关键'
+    ],
+    steps: [
+      { t: '第 1 步：算潜在毛租金', d: '第 5 行。可租面积 × 月租金 × 12 个月，再除以 10000 换成万元。这一步的单位换算最容易错。' },
+      { t: '第 2 步：扣空置', d: '第 7 行。有效毛收入 = 潜在毛收入 ×（1 − 空置与坏账率）。' },
+      { t: '第 3 步：加其他收入', d: '第 9 行。车位、广告位这些也是物业的收入。' },
+      { t: '第 4 步：算运营支出', d: '第 16 行。四项加总。注意这里面没有利息、没有折旧。' },
+      { t: '第 5 步：算 NOI 并估值', d: '第 19 行与第 22 行。NOI ÷ Cap Rate 就是物业价值。' },
+      { t: '第 6 步：做 Cap Rate 敏感性', d: '第 26–31 行。上下各 50bp，看估值摆动多少、占基准的百分之多少。' },
+      { t: '第 7 步：反过来想', d: '第 35 行。如果按这个价格成交，买家实际拿到的初始收益率是多少？和 Cap Rate 应该完全一致。' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一个具体项目或成交案例。\n' +
+      '面积、租金、空置率、运营支出与 Cap Rate 的量级参照国内一二线城市甲级写字楼' +
+      '公开市场报告中的常见区间设定（核心城市甲级写字楼 Cap Rate 多在 4.5%–6%），' +
+      '用于演示 NOI 口径与直接资本化法，不可用于任何投资判断。\n' +
+      '单位：金额为万元人民币，面积为平方米，租金为元/平方米/月。',
+    takeaways: [
+      'NOI 口径里**没有利息、没有折旧、没有所得税、没有资本开支**。这不是疏漏，是刻意的：只有把资产本身的赚钱能力和融资方式分开，不同杠杆水平的物业才能放在一起比。这和企业估值里 EBITDA 的定位完全一样。',
+      'Cap Rate 从 5.2% 变到 4.7% 或 5.7%，估值摆动 **9,821 万元，相当于基准估值的 19.4%**。而空置率假设从 8% 调到 9%，估值只变约 1.5%。**在不动产里，一个从市场观察来的 Cap Rate，比你在收入端反复推敲的假设重要一个数量级。**',
+      '第 35 行算出的初始收益率必然精确等于 Cap Rate——因为它们本来就是同一个定义的两种说法。**看到"Cap Rate"和"初始收益率 initial yield"两个词时，先确认对方指的是不是同一件事**，这是尽调里很常见的口径混淆。'
+    ],
+    sheets: [{
+      name: '单栋物业估值',
+      unit: '万元人民币 / 平方米 / 元每平方米每月',
+      header: ['项目', '数值'],
+      rows: [
+        SEC('一、收入（教学假设）'),                                                              // 2
+        R('可租面积（㎡）', [G(18000)], { fmt: 'num0' }),                                          // 3
+        R('平均租金（元/㎡/月）', [G(180)], { fmt: 'num0' }),                                      // 4
+        R('潜在毛租金收入 PGI（年，万元）', [I('=B3*B4*12/10000')], { style: 'tot', note: '注意换算：元 → 万元' }), // 5
+        R('空置与坏账率', [G(0.08)], {
+          fmt: 'pct1'
+        }),                                                                                       // 6
+        R('有效毛租金收入 EGI', [I('=B5*(1-B6)')]),                                                // 7
+        R('其他收入（车位、广告位）', [G(240)]),                                                   // 8
+        R('总有效收入', [I('=B7+B8')], { style: 'tot' }),                                          // 9
+        GAP(),                                                                                     // 10
+        SEC('二、运营支出（不含利息、折旧、所得税、资本开支）'),                                   // 11
+        R('物业管理费', [G(620)]),                                                                 // 12
+        R('能源与维修', [G(310)]),                                                                 // 13
+        R('保险与房产税等', [G(180)]),                                                             // 14
+        R('资产管理费', [G(76)]),                                                                  // 15
+        R('运营支出合计', [I('=SUM(B12:B15)')], { style: 'tot' }),                                 // 16
+        GAP(),                                                                                     // 17
+        SEC('三、NOI 与估值'),                                                                     // 18
+        R('净运营收入 NOI', [I('=B9-B16')], { style: 'tot' }),                                     // 19
+        R('运营利润率 = NOI ÷ 总有效收入', [I('=B19/B9')], { fmt: 'pct1' }),                       // 20
+        R('市场资本化率 Cap Rate', [G(0.052)], { fmt: 'pct2', note: '从可比成交观察得来，不是算出来的' }), // 21
+        R('物业估值 = NOI ÷ Cap Rate', [I('=B19/B21')], { style: 'tot' }),                         // 22
+        R('单位面积估值（元/㎡）', [I('=B22*10000/B3')], { fmt: 'num0' }),                         // 23
+        R('相当于多少倍 NOI', [I('=B22/B19')], { fmt: 'num1' }),                                   // 24
+        GAP(),                                                                                     // 25
+        SEC('四、Cap Rate 敏感性'),                                                                // 26
+        R('Cap Rate − 50bp', [I('=$B$21-0.005')], { fmt: 'pct2' }),                                // 27
+        R('对应估值', [I('=$B$19/B27')]),                                                          // 28
+        R('Cap Rate + 50bp', [I('=$B$21+0.005')], { fmt: 'pct2' }),                                // 29
+        R('对应估值', [I('=$B$19/B29')]),                                                          // 30
+        R('±50bp 造成的估值摆动', [I('=B28-B30')], { style: 'tot' }),                              // 31
+        R('摆动占基准估值', [I('=B31/B22')], { fmt: 'pct1' }),                                     // 32
+        GAP(),                                                                                     // 33
+        SEC('五、反过来验一遍'),                                                                   // 34
+        R('按基准估值成交时的初始收益率 = NOI ÷ 成交价', [I('=B19/B22')], { fmt: 'pct2' }),        // 35
+        R('校验：初始收益率 − Cap Rate（应为 0）', [I('=B35-B21')], { style: 'tot' }),             // 36
+        R('校验：有效租金 + 其他收入 − 运营支出 − NOI（应为 0）', [I('=B7+B8-B16-B19')], { style: 'tot' }) // 37
+      ]
+    }]
+  });
+
+  /* ==========================================================================
+   * 2. 经营性物业贷：LTV / DSCR / 债务收益率 —— 中级
+   * ========================================================================*/
+  add({
+    id: 're-dscr', market: 'primary', level: 2, type: 'realestate',
+    companyId: null, industryId: null,
+    title: '经营性物业贷：DSCR、LTV 与压力测试',
+    subtitle: '贷款人不关心这栋楼能涨到多少，只关心它每年的现金流够不够还本付息',
+    minutes: 45, tags: ['DSCR', 'LTV', '债务收益率', '等额本息', '契约测试', '压力测试'],
+    intro:
+      '同一栋楼，股权投资人和贷款人看的是完全不同的两件事。\n\n' +
+      '**股权看上行**：租金能不能涨、Cap Rate 会不会压缩、几年后能卖多少钱。\n' +
+      '**贷款人看下行**：租金跌多少我会收不回钱、这栋楼跌到什么价我的本金开始受损。\n\n' +
+      '所以放贷决策围绕三个比率：\n\n' +
+      '**LTV（贷款价值比）= 贷款额 ÷ 物业价值**，回答"抵押物够不够厚"。\n' +
+      '**DSCR（偿债备付率）= NOI ÷ 年还本付息额**，回答"现金流够不够还"。\n' +
+      '**债务收益率 Debt Yield = NOI ÷ 贷款额**，回答"不管利率和期限怎么设计，这笔贷款的真实收益率是多少"。\n\n' +
+      '第三个最值得注意。LTV 依赖估值，而估值依赖 Cap Rate——**Cap Rate 是个观察值，可以被乐观地取**。' +
+      'DSCR 依赖利率和摊还年限，**把期限拉长、做成先息后本，DSCR 就好看了**。' +
+      '只有债务收益率两头都不依赖，所以 2008 年之后它成了美国 CMBS 市场的核心风控指标。\n\n' +
+      '模型的第 2 张表做压力测试：租金要跌多少，DSCR 才会击穿 1.25 的契约线？' +
+      '你会发现这个缓冲比直觉中小得多。',
+    objectives: [
+      '掌握 LTV、DSCR、ICR、债务收益率四个指标的定义与计算',
+      '理解为什么债务收益率不受利率与摊还期限的影响，以及这为什么重要',
+      '会用 PMT 计算等额本息年供，并区分还本付息额与纯利息',
+      '会做契约测试并计算 headroom：租金还能跌多少才触发违约',
+      '理解"拉长摊还期让 DSCR 变好看"是一种结构性粉饰，并能用债务收益率识破它'
+    ],
+    steps: [
+      { t: '第 1 步：定贷款规模', d: '第 1 张表第 3–6 行。物业价值 × LTV 上限 = 可贷金额。' },
+      { t: '第 2 步：算年供', d: '第 11 行。用 PMT(利率, 期数, 现值)。注意函数返回的是负数，前面加负号转正。' },
+      { t: '第 3 步：拆本息', d: '第 12–13 行。第一年利息 = 贷款余额 × 利率；本金 = 年供 − 利息。' },
+      { t: '第 4 步：算三个比率', d: '第 16–19 行。DSCR 用年供做分母，ICR 只用利息做分母，两者差别很大。' },
+      { t: '第 5 步：做契约测试', d: '第 22–25 行。逐条对照，是否通过用 IF 标记。' },
+      { t: '第 6 步：算缓冲', d: '第 28–30 行。NOI 还能跌多少（金额与百分比）才让 DSCR 掉到 1.25。' },
+      { t: '第 7 步：压力测试', d: '第 2 张表。三档租金下跌情景，分别看 NOI、DSCR、LTV 和是否违约。' },
+      { t: '第 8 步：识破结构粉饰', d: '第 2 张表第四、五节。同一笔贷款换三种还款结构，DSCR 从 1.54 一路变好到 2.75——但债务收益率一动不动。' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一笔具体贷款。\n' +
+      '物业价值与 NOI 沿用本站「写字楼：NOI 与资本化率估值」的教学假设；' +
+      'LTV 上限、利率、摊还年限与契约阈值参照国内经营性物业贷与境外 CMBS 的常见条款区间设定' +
+      '（DSCR 契约线常见于 1.20–1.35，LTV 上限常见于 50%–65%），' +
+      '用于演示偿债能力指标的计算与压力测试方法，不可用于任何融资或投资判断。单位：万元人民币。',
+    takeaways: [
+      'DSCR 1.54 看起来很安全，但缓冲只有 **19.0%**——NOI 跌 19% 就触及 1.25 的契约线。而因为运营支出刚性，NOI 的跌幅是收入跌幅的 **1.45 倍**，所以收入只要跌约 13% 就够了。压力测试里收入跌 15% 那一档，DSCR 已经掉到 1.21，**违约**。',
+      '同一笔贷款，摊还期从 20 年拉到 30 年，DSCR 从 1.54 升到 **1.95**；再改成先息后本，直接跳到 **2.75**。但债务收益率三种结构下都是 **11.6%**，一分没动——**现金流一分钱没多，只是把还本推到了以后**。这就是为什么 2008 年之后债务收益率成了核心风控指标：它是唯一不能被条款设计操纵的那个。',
+      'LTV 依赖估值、估值依赖 Cap Rate，而 Cap Rate 是从可比成交观察来的、可以被乐观地取。**三个指标里只有债务收益率的分子分母都是硬数**——NOI 是实际收到的租金减实际花掉的支出，贷款额是实际放出去的钱。'
+    ],
+    sheets: [
+      {
+        name: '融资结构与偿债能力',
+        unit: '万元人民币',
+        header: ['项目', '数值'],
+        rows: [
+          SEC('一、抵押物与贷款'),                                                                  // 2
+          R('物业评估价值', [G(50595)], { note: '沿用 NOI ÷ Cap Rate 的估值结果' }),                // 3
+          R('年度净运营收入 NOI', [G(2631)], { note: '沿用同一物业的 NOI' }),                       // 4
+          R('贷款价值比 LTV 上限', [G(0.45)], { fmt: 'pct0' }),                                     // 5
+          R('贷款金额', [I('=B3*B5')], { style: 'tot' }),                                           // 6
+          GAP(),                                                                                    // 7
+          SEC('二、还款安排'),                                                                      // 8
+          R('贷款年利率', [G(0.042)], { fmt: 'pct1' }),                                             // 9
+          R('摊还年限（年）', [G(20)], { fmt: 'num0' }),                                            // 10
+          R('年还本付息额（等额本息）', [I('=-PMT(B9,B10,B6)')], { style: 'tot', note: 'PMT 返回负数，取负转正' }), // 11
+          R('第 1 年利息', [I('=B6*B9')]),                                                          // 12
+          R('第 1 年偿还本金', [I('=B11-B12')]),                                                    // 13
+          GAP(),                                                                                    // 14
+          SEC('三、三个核心比率'),                                                                  // 15
+          R('LTV = 贷款 ÷ 物业价值', [I('=B6/B3')], { fmt: 'pct1' }),                               // 16
+          R('DSCR = NOI ÷ 年还本付息', [I('=B4/B11')], { fmt: 'num2', style: 'tot' }),              // 17
+          R('ICR = NOI ÷ 年利息', [I('=B4/B12')], { fmt: 'num2' }),                                 // 18
+          R('债务收益率 Debt Yield = NOI ÷ 贷款额', [I('=B4/B6')], { fmt: 'pct1', style: 'tot' }),  // 19
+          GAP(),                                                                                    // 20
+          SEC('四、契约测试'),                                                                      // 21
+          R('契约要求：DSCR 下限', [G(1.25)], { fmt: 'num2' }),                                     // 22
+          R('契约要求：LTV 上限', [G(0.60)], { fmt: 'pct0' }),                                      // 23
+          R('DSCR 是否通过（1 = 通过）', [
+            I('=IF(B17>=B22,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' })
+          ], { fmt: 'num0' }),                                                                      // 24
+          R('LTV 是否通过（1 = 通过）', [
+            I('=IF(B16<=B23,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' })
+          ], { fmt: 'num0' }),                                                                      // 25
+          GAP(),                                                                                    // 26
+          SEC('五、还剩多少缓冲'),                                                                  // 27
+          R('触及 DSCR 契约线所需的 NOI', [I('=B22*B11')]),                                         // 28
+          R('NOI 还能跌多少（金额）', [I('=B4-B28')]),                                              // 29
+          R('NOI 还能跌多少（比例）', [I('=B29/B4')], { fmt: 'pct1', style: 'tot' }),               // 30
+          GAP(),                                                                                    // 31
+          SEC('六、校验'),                                                                          // 32
+          R('校验：第 1 年利息 + 本金 − 年供（应为 0）', [I('=B12+B13-B11')], { style: 'tot' }),    // 33
+          R('校验：DSCR × 年供 − NOI（应为 0）', [I('=B17*B11-B4')], { style: 'tot' })              // 34
+        ]
+      },
+      {
+        name: '压力测试与结构粉饰',
+        unit: '万元人民币',
+        header: ['情景', '收入跌幅', 'NOI', 'DSCR'],
+        rows: [
+          SEC('一、收入下跌对 NOI 的放大效应（运营支出是刚性的）'),                                 // 2
+          R('基准运营支出', [G(1186), E(), E()], { note: '沿用同一物业的运营支出' }),               // 3
+          R('基准总有效收入 = NOI + 运营支出', [I("='融资结构与偿债能力'!B4+B3"), E(), E()]),       // 4
+          GAP(),                                                                                    // 5
+          SEC('二、三档情景'),                                                                      // 6
+          R('情景 A', [G(0.05, { fmt: 'pct0' }), I('=$B$4*(1-B7)-$B$3'), I("=C7/'融资结构与偿债能力'!B11", { fmt: 'num2' })]), // 7
+          R('情景 B', [G(0.10, { fmt: 'pct0' }), I('=$B$4*(1-B8)-$B$3'), I("=C8/'融资结构与偿债能力'!B11", { fmt: 'num2' })]), // 8
+          R('情景 C', [G(0.15, { fmt: 'pct0' }), I('=$B$4*(1-B9)-$B$3'), I("=C9/'融资结构与偿债能力'!B11", { fmt: 'num2' })]), // 9
+          GAP(),                                                                                    // 10
+          SEC('三、NOI 的跌幅比收入大多少'),                                                        // 11
+          R('情景 B 下 NOI 跌幅', [I("=1-C8/'融资结构与偿债能力'!B4"), E(), E()], { fmt: 'pct1' }), // 12
+          R('对应的收入跌幅', [I('=B8'), E(), E()], { fmt: 'pct1' }),                               // 13
+          R('放大倍数（经营杠杆）', [I('=B12/B13'), E(), E()], { fmt: 'num2', style: 'tot' }),      // 14
+          R('三档里最先击穿 1.25 的那一档收入跌幅', [I('=IF(D8<1.25,B8,B9)'), E(), E()], { fmt: 'pct0' }), // 15
+          GAP(),                                                                                    // 16
+          SEC('四、同一笔贷款，换个还款结构'),                                                      // 17
+          R('结构一：原方案 20 年等额本息 —— DSCR', [I("='融资结构与偿债能力'!B17"), E(), E()], { fmt: 'num2' }), // 18
+          R('结构二：摊还期拉长到 30 年 —— 年供', [I("=-PMT('融资结构与偿债能力'!B9,30,'融资结构与偿债能力'!B6)"), E(), E()]), // 19
+          R('结构二 —— DSCR', [I("='融资结构与偿债能力'!B4/B19"), E(), E()], { fmt: 'num2', style: 'tot' }), // 20
+          R('结构三：改为先息后本 —— 年付息', [I("='融资结构与偿债能力'!B6*'融资结构与偿债能力'!B9"), E(), E()]), // 21
+          R('结构三 —— DSCR', [I("='融资结构与偿债能力'!B4/B21"), E(), E()], { fmt: 'num2', style: 'tot' }), // 22
+          R('从结构一到结构三，DSCR 改善了多少', [I('=B22-B18'), E(), E()], { fmt: 'num2' }),       // 23
+          GAP(),                                                                                    // 24
+          SEC('五、但债务收益率一动不动'),                                                          // 25
+          R('债务收益率（三种结构下都是同一个数）', [I("='融资结构与偿债能力'!B4/'融资结构与偿债能力'!B6"), E(), E()], { fmt: 'pct1', style: 'tot' }), // 26
+          R('校验：本表债务收益率 − 第 1 张表债务收益率（应为 0）', [I("=B26-'融资结构与偿债能力'!B19"), E(), E()], { fmt: 'num4', style: 'tot' }), // 27
+          GAP(),                                                                                    // 28
+          SEC('六、校验'),                                                                          // 29
+          R('校验：基准总有效收入 − 运营支出 − 基准 NOI（应为 0）', [I("=B4-B3-'融资结构与偿债能力'!B4"), E(), E()], { style: 'tot' }) // 30
+        ]
+      }
+    ]
+  });
+
+  /* ==========================================================================
+   * 3. 开发项目现金流与股权 IRR —— 复杂
+   * ========================================================================*/
+  add({
+    id: 're-dev-irr', market: 'primary', level: 3, type: 'realestate',
+    companyId: null, industryId: null,
+    title: '开发项目：分期现金流与股权 IRR',
+    subtitle: '土地款一次性砸下去，销售款分四年慢慢回——中间的时间差决定了这个项目赚不赚钱',
+    minutes: 60, tags: ['开发项目', '项目 IRR', '股权 IRR', '开发贷', '杠杆放大', '峰值资金占用'],
+    intro:
+      '前两个模型看的是**已建成、能出租的物业**：现金流稳定，用 NOI ÷ Cap Rate 估值。' +
+      '开发项目完全不同——**它在建成之前没有任何现金流入，只有持续的流出**。\n\n' +
+      '所以开发项目不能用资本化法，只能老老实实排现金流算 IRR。而这里有三件事和企业 DCF 不一样：\n\n' +
+      '**第一，没有终值。** 项目卖完就结束了，现金流有明确终点。这一点和生物医药的 rNPV 一样。\n\n' +
+      '**第二，时间差就是全部利润。** 土地款在第 0 年一次性付清，建安费按工程进度分摊，' +
+      '销售回款却要等到预售之后才开始。**同样的总收入和总成本，回款节奏差一年，IRR 能差十个点以上。**\n\n' +
+      '**第三，杠杆的作用是双向且剧烈的。** 开发贷把股权投入压到很小，' +
+      'IRR 会被大幅放大——但同样的机制在销售不及预期时会把股权迅速归零。\n\n' +
+      '模型会让你算出三个数：**项目 IRR**（不含融资，衡量资产本身）、' +
+      '**股权 IRR**（含融资，衡量投资人实际回报）、' +
+      '以及**峰值资金占用**（这个项目最多要压多少钱进去，决定了你需要多大的资金池）。\n\n' +
+      '最后一节做延迟情景：销售整体推迟一年，看 IRR 掉多少。这是开发商真正的风险所在。',
+    objectives: [
+      '会按年排开发项目的成本支出与销售回款，理解为什么开发项目没有终值',
+      '掌握项目 IRR（无杠杆）与股权 IRR（有杠杆）的区别与各自的用途',
+      '会用 IRR 与 NPV 函数处理不规则现金流',
+      '理解峰值资金占用的含义，并知道它为什么比总投资额更能决定项目可行性',
+      '能定量说明销售回款推迟对 IRR 的影响，理解开发项目的核心风险是时间不是价格'
+    ],
+    steps: [
+      { t: '第 1 步：排成本', d: '第 1 张表。土地款在第 0 年一次付清，建安按进度分摊到第 0–2 年。' },
+      { t: '第 2 步：排回款', d: '第 2 张表。按销售进度乘可售货值，注意第 0 年没有回款。' },
+      { t: '第 3 步：算项目现金流', d: '第 3 张表第 5 行。回款 − 成本，不考虑任何融资。' },
+      { t: '第 4 步：算项目 IRR', d: '第 7 行。用 IRR 函数对第 0–4 年的现金流求解。' },
+      { t: '第 5 步：加融资', d: '第 10–16 行。开发贷在第 0 年提取，第 3 年一次性还本，期间按期初余额付息。' },
+      { t: '第 6 步：算股权 IRR', d: '第 19–21 行。股权现金流 = 项目现金流 + 贷款提取 − 还本 − 利息，再对它求 IRR。' },
+      { t: '第 7 步：算峰值占用', d: '第 23 行。累计股权现金流的最小值取负——这才是你真正要准备的钱。' },
+      { t: '第 8 步：做延迟情景', d: '第 26–32 行。销售整体推迟一年、货值一分不少（第 28 行校验），重算股权 IRR 看掉多少。' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一个具体开发项目。\n' +
+      '地价、建安成本、货值、销售节奏、开发贷利率与提款还款安排均为教学设定，' +
+      '量级参照国内住宅开发项目的常见结构（土地款约占总成本四成、开发周期三到四年、' +
+      '开发贷利率高于经营性物业贷），用于演示开发项目现金流与 IRR 的建模方法，' +
+      '不可用于任何投资判断。单位：万元人民币。',
+    takeaways: [
+      '项目 IRR 18.0%，股权 IRR 28.9%，**10.9 个百分点全部来自杠杆**。但更该看的是第 23 行的峰值资金占用 53,000——它比"股权投入总额"更能决定项目做不做得起来：**在回款起来之前，这笔钱你要一直垫着**。很多项目不是算不过账，是资金链撑不到回款那一天。',
+      '销售整体推迟一年，货值、总成本、账面利润**一分钱没变**（第 28 行校验为 0），股权 IRR 却从 28.9% 掉到 12.2%，**少了 16.7 个百分点**。这是开发项目和制造业最本质的区别：**利润是既定的，回报率完全由时间决定**。所以开发商真正在抢的是开盘节点，不是售价那几个点。',
+      '开发项目**没有终值**——卖完就结束了。这一点和站里其他 DCF 模型（终值占企业价值六成以上）形成鲜明对比，和生物医药 rNPV 的专利悬崖是同一类结构。**判断一个资产该不该有终值，是估值方法选择的第一步。**'
+    ],
+    sheets: [
+      {
+        name: '开发成本与进度',
+        unit: '万元人民币',
+        header: ['项目', '第 0 年', '第 1 年', '第 2 年', '第 3 年', '第 4 年'],
+        rows: [
+          SEC('一、总成本（教学假设）'),                                                            // 2
+          R('土地款', [G(72000), G(0), G(0), G(0), G(0)]),                                          // 3
+          R('建安工程总成本', [G(96000), E(), E(), E(), E()], { note: '总额，按下面的进度分摊' }),  // 4
+          R('建安进度', [G(0.25, { fmt: 'pct0' }), G(0.45, { fmt: 'pct0' }), G(0.30, { fmt: 'pct0' }), G(0, { fmt: 'pct0' }), G(0, { fmt: 'pct0' })]), // 5
+          R('当年建安支出', [I('=$B$4*B5'), I('=$B$4*C5'), I('=$B$4*D5'), I('=$B$4*E5'), I('=$B$4*F5')]), // 6
+          R('销售与管理费用', [G(2000), G(4800), G(5600), G(3200), G(1200)]),                       // 7
+          R('当年总成本支出', [I('=B3+B6+B7'), I('=C3+C6+C7'), I('=D3+D6+D7'), I('=E3+E6+E7'), I('=F3+F6+F7')], { style: 'tot' }), // 8
+          GAP(),                                                                                    // 9
+          SEC('二、校验'),                                                                          // 10
+          R('建安进度合计（应为 100%）', [I('=SUM(B5:F5)'), E(), E(), E(), E()], { fmt: 'pct0', style: 'tot' }), // 11
+          R('建安支出合计', [I('=SUM(B6:F6)'), E(), E(), E(), E()]),                                // 12
+          R('校验：建安支出合计 − 建安总成本（应为 0）', [I('=B12-B4'), E(), E(), E(), E()], { style: 'tot' }), // 13
+          R('五年总成本支出', [I('=SUM(B8:F8)'), E(), E(), E(), E()], { style: 'tot' })              // 14
+        ]
+      },
+      {
+        name: '销售与回款',
+        unit: '万元人民币',
+        header: ['项目', '第 0 年', '第 1 年', '第 2 年', '第 3 年', '第 4 年'],
+        rows: [
+          SEC('一、可售货值（教学假设）'),                                                          // 2
+          R('可售面积（㎡）', [G(120000), E(), E(), E(), E()], { fmt: 'num0' }),                    // 3
+          R('平均售价（元/㎡）', [G(19500), E(), E(), E(), E()], { fmt: 'num0' }),                  // 4
+          R('可售总货值（万元）', [I('=B3*B4/10000'), E(), E(), E(), E()], { style: 'tot', note: '注意换算：元 → 万元' }), // 5
+          GAP(),                                                                                    // 6
+          SEC('二、销售回款节奏'),                                                                  // 7
+          R('当年回款比例', [G(0, { fmt: 'pct0' }), G(0.30, { fmt: 'pct0' }), G(0.35, { fmt: 'pct0' }), G(0.25, { fmt: 'pct0' }), G(0.10, { fmt: 'pct0' })]), // 8
+          R('当年回款金额', [I('=$B$5*B8'), I('=$B$5*C8'), I('=$B$5*D8'), I('=$B$5*E8'), I('=$B$5*F8')], { style: 'tot' }), // 9
+          GAP(),                                                                                    // 10
+          SEC('三、校验'),                                                                          // 11
+          R('回款比例合计（应为 100%）', [I('=SUM(B8:F8)'), E(), E(), E(), E()], { fmt: 'pct0', style: 'tot' }), // 12
+          R('校验：回款合计 − 可售总货值（应为 0）', [I('=SUM(B9:F9)-B5'), E(), E(), E(), E()], { style: 'tot' }), // 13
+          GAP(),                                                                                    // 14
+          SEC('四、账面利润（和回报率是两回事）'),                                                  // 15
+          R('总收入', [I('=B5'), E(), E(), E(), E()]),                                              // 16
+          R('总成本（引自第 1 张表）', [I("='开发成本与进度'!B14"), E(), E(), E(), E()]),           // 17
+          R('账面利润', [I('=B16-B17'), E(), E(), E(), E()], { style: 'tot' }),                     // 18
+          R('账面利润率', [I('=B18/B16'), E(), E(), E(), E()], { fmt: 'pct1' })                     // 19
+        ]
+      },
+      {
+        name: '项目与股权 IRR',
+        unit: '万元人民币',
+        header: ['项目', '第 0 年', '第 1 年', '第 2 年', '第 3 年', '第 4 年'],
+        rows: [
+          SEC('一、项目现金流（不含融资）'),                                                        // 2
+          R('销售回款', [I("='销售与回款'!B9"), I("='销售与回款'!C9"), I("='销售与回款'!D9"), I("='销售与回款'!E9"), I("='销售与回款'!F9")]), // 3
+          R('成本支出', [I("='开发成本与进度'!B8"), I("='开发成本与进度'!C8"), I("='开发成本与进度'!D8"), I("='开发成本与进度'!E8"), I("='开发成本与进度'!F8")]), // 4
+          R('项目净现金流', [I('=B3-B4'), I('=C3-C4'), I('=D3-D4'), I('=E3-E4'), I('=F3-F4')], { style: 'tot' }), // 5
+          R('累计项目现金流', [I('=B5'), I('=B6+C5'), I('=C6+D5'), I('=D6+E5'), I('=E6+F5')]),      // 6
+          R('项目 IRR（无杠杆）', [I('=IRR(B5:F5)'), E(), E(), E(), E()], { fmt: 'pct1', style: 'tot' }), // 7
+          GAP(),                                                                                    // 8
+          SEC('二、开发贷（教学假设）'),                                                            // 9
+          R('贷款额度', [G(45000), E(), E(), E(), E()]),                                            // 10
+          R('贷款年利率', [G(0.068), E(), E(), E(), E()], { fmt: 'pct1' }),                         // 11
+          R('当年提款', [I('=$B$10'), G(0), G(0), G(0), G(0)]),                                     // 12
+          R('当年还本', [G(0), G(0), G(0), I('=$B$10'), G(0)]),                                     // 13
+          R('期初贷款余额', [G(0), I('=B15'), I('=C15'), I('=D15'), I('=E15')]),                    // 14
+          R('期末贷款余额', [I('=B14+B12-B13'), I('=C14+C12-C13'), I('=D14+D12-D13'), I('=E14+E12-E13'), I('=F14+F12-F13')]), // 15
+          R('当年利息（按期初余额计，提款当年不计息）',
+            [I('=B14*$B$11'), I('=C14*$B$11'), I('=D14*$B$11'), I('=E14*$B$11'), I('=F14*$B$11')]), // 16
+          GAP(),                                                                                    // 17
+          SEC('三、股权现金流与回报'),                                                              // 18
+          R('股权净现金流', [I('=B5+B12-B13-B16'), I('=C5+C12-C13-C16'), I('=D5+D12-D13-D16'), I('=E5+E12-E13-E16'), I('=F5+F12-F13-F16')], { style: 'tot' }), // 19
+          R('累计股权现金流', [I('=B19'), I('=B20+C19'), I('=C20+D19'), I('=D20+E19'), I('=E20+F19')]), // 20
+          R('股权 IRR（含杠杆）', [I('=IRR(B19:F19)'), E(), E(), E(), E()], { fmt: 'pct1', style: 'tot' }), // 21
+          R('杠杆带来的 IRR 增量（百分点）', [I('=(B21-B7)*100'), E(), E(), E(), E()], { fmt: 'num1' }), // 22
+          R('峰值资金占用 = 累计股权现金流的最小值', [I('=-MIN(B20:F20)'), E(), E(), E(), E()], { style: 'tot' }), // 23
+          GAP(),                                                                                    // 24
+          SEC('四、销售整体推迟一年（总货值一分不少，只是晚到）'),                                  // 25
+          /* 原第 1–3 年的回款各后移一年；原第 3、4 年的 25% 与 10% 一起落在第 4 年。
+             合计仍是 100% 货值——这一节要证明的正是「钱一分没少，只是晚了」。 */
+          R('推迟后回款', [
+            G(0),
+            G(0),
+            I("='销售与回款'!C9"),
+            I("='销售与回款'!D9"),
+            I("='销售与回款'!E9+'销售与回款'!F9")
+          ]),                                                                                       // 26
+          R('推迟后回款合计', [I('=SUM(B26:F26)'), E(), E(), E(), E()]),                            // 27
+          R('校验：推迟后回款合计 − 原货值（应为 0）', [I("=B27-'销售与回款'!B5"), E(), E(), E(), E()], { style: 'tot' }), // 28
+          R('推迟后项目净现金流', [I('=B26-B4'), I('=C26-C4'), I('=D26-D4'), I('=E26-E4'), I('=F26-F4')]), // 29
+          R('推迟后股权净现金流', [I('=B29+B12-B13-B16'), I('=C29+C12-C13-C16'), I('=D29+D12-D13-D16'), I('=E29+E12-E13-E16'), I('=F29+F12-F13-F16')]), // 30
+          R('推迟后股权 IRR', [I('=IRR(B30:F30)'), E(), E(), E(), E()], { fmt: 'pct1', style: 'tot' }), // 31
+          R('IRR 下降（百分点）', [I('=(B21-B31)*100'), E(), E(), E(), E()], { fmt: 'num1', style: 'tot' }), // 32
+          GAP(),                                                                                    // 33
+          SEC('五、校验'),                                                                          // 34
+          R('校验：第 4 年末贷款余额（应为 0）', [I('=F15'), E(), E(), E(), E()], { style: 'tot' }), // 35
+          R('校验：累计项目现金流 − 账面利润（应为 0）', [I("=F6-'销售与回款'!B18"), E(), E(), E(), E()], { style: 'tot' }), // 36
+          R('累计利息', [I('=SUM(B16:F16)'), E(), E(), E(), E()]),                                  // 37
+          R('校验：累计股权现金流 −（账面利润 − 累计利息）（应为 0）', [I("=F20-('销售与回款'!B18-B37)"), E(), E(), E(), E()], { style: 'tot' }) // 38
+        ]
+      }
+    ]
+  });
+})();
+</script>
+<script>
+/* ===== data/ext-03-credit.js ===== */
+/* ============================================================================
+ * ext-03-credit.js —— 信用分析：债权人视角（新类型 credit）
+ *   · cr-leverage   简单 —— 杠杆与覆盖倍数：债权人到底看哪几个数
+ *   · cr-covenant   中级 —— 契约测试、headroom 与 EBITDA 加回的操纵空间
+ *   · cr-recovery   复杂 —— 违约回收瀑布：同一家公司，不同债务层级差别极大
+ *
+ * 全部数据为教学假设。财务结构与契约阈值的量级参照高收益债市场的常见区间，
+ * 但不对应任何一家具体公司或任何一笔具体债券。见每个模型的 dataNote。
+ *
+ * 行号约定：第 1 行是表头，rows[0] 即第 2 行；SEC / GAP 各占一行。
+ * ==========================================================================*/
+(function () {
+  'use strict';
+  const { G, I, E, R, SEC, GAP } = window.S;
+  const add = window.DB.addModel;
+
+  /* ==========================================================================
+   * 1. 杠杆与覆盖倍数 —— 简单
+   * ========================================================================*/
+  add({
+    id: 'cr-leverage', market: 'secondary', level: 1, type: 'credit',
+    companyId: null, industryId: null,
+    title: '债权人看什么：杠杆倍数与覆盖倍数',
+    subtitle: '股东问"这家公司能涨多少"，债权人只问一件事：它会不会还不上钱',
+    minutes: 30, tags: ['净债务/EBITDA', '利息覆盖', 'FFO', '自由现金流', '债权人视角'],
+    intro:
+      '同一份财报，股东和债权人读出来的东西几乎没有重叠。\n\n' +
+      '**股东的收益是无上限的**，所以他关心增长、市占率、新业务。\n' +
+      '**债权人的收益是封顶的**——最好的结果就是按时拿回本金和约定利息，' +
+      '不会因为公司业绩暴涨而多拿一分钱。所以他的全部注意力都在下行：' +
+      '**这家公司最坏会怎样，那时候我还能不能拿回钱。**\n\n' +
+      '这个不对称决定了信用分析的整套指标都是"倍数"而不是"增长率"：\n\n' +
+      '**净债务 / EBITDA** —— 存量视角：现在的债务，要靠多少年的经营现金流才还得完。\n' +
+      '**EBITDA / 利息** —— 流量视角：一年赚的钱，够付几倍的利息。\n' +
+      '**（EBITDA − 资本开支）/ 利息** —— 更严的流量视角：设备该换还得换，那部分钱不能拿去付息。\n' +
+      '**FFO / 净债务** —— 评级机构最常用的口径之一。\n\n' +
+      '这个模型给你两家公司：A 增长快、ROE 高、股东爱；B 增长慢、ROE 平庸。' +
+      '但从债权人角度看，结论会**完全反过来**。做完你要能说清为什么。',
+    objectives: [
+      '掌握净债务、EBITDA、FFO 三个基础量的构造',
+      '掌握净债务/EBITDA、利息覆盖倍数、FFO/净债务的计算与含义',
+      '理解为什么要用（EBITDA − 资本开支）/ 利息这个更严的口径',
+      '理解债权人收益封顶、损失不封顶的不对称性，及其对分析视角的决定作用',
+      '能对同一组数据分别给出股东结论和债权人结论，并解释为什么两者可以相反'
+    ],
+    steps: [
+      { t: '第 1 步：算 EBITDA', d: '第 7 行。营业利润 + 折旧摊销。' },
+      { t: '第 2 步：算净债务', d: '第 12 行。有息负债合计 − 货币资金。注意是"净"，账上的现金要扣掉。' },
+      { t: '第 3 步：算 FFO', d: '第 15 行。EBITDA − 利息 − 所得税，是经营产生、可用于还债的现金流近似。' },
+      { t: '第 4 步：算四个比率', d: '第 18–21 行。两个杠杆比率、两个覆盖比率。' },
+      { t: '第 5 步：看股东视角', d: '第 24–26 行。ROE 与收入增速——A 明显更好看。' },
+      { t: '第 6 步：换成债权人视角', d: '第 27 行。对照第 18–21 行，结论反过来了。想清楚为什么。' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一家具体公司。\n' +
+      '两家公司的财务结构按"高杠杆高增长"与"低杠杆低增长"两种典型画像构造，' +
+      '杠杆与覆盖倍数的量级参照高收益债与投资级债券的常见区间设定' +
+      '（净债务/EBITDA 超过 4 倍通常已属高收益区间，利息覆盖低于 3 倍需要警惕），' +
+      '用于演示债权人视角的指标体系，不可用于任何投资判断。单位：百万元人民币。',
+    takeaways: [
+      '公司 A 的 ROE 是 B 的 **1.7 倍**（19.6% vs 11.4%），收入增速 30.2% 对 4.3%——**股东视角下 A 完胜**。但 A 的净债务/EBITDA 是 **4.69 倍**、利息覆盖只有 **2.61 倍**；B 分别是 1.30 倍和 10.39 倍。**债权人视角下结论完全反过来**，而且不是差一点，是差一个信用等级区间。',
+      'A 的高 ROE 有很大一部分**就是杠杆本身贡献的**——这正是杜邦分解里的权益乘数。**同一个杠杆，在股东眼里是放大器，在债权人眼里是风险源**。看到高 ROE 时的第一个动作应该是问：这里面多少来自经营，多少来自借钱。',
+      '把资本开支从 EBITDA 里扣掉之后，A 的覆盖倍数从 **2.61 掉到 1.33**——**赚的钱付完利息、换完设备，几乎一分不剩**。EBITDA 忽略了"设备该换还得换"这件事，所以只看 EBITDA/利息会系统性高估偿债能力，资本密集型行业尤其如此。'
+    ],
+    sheets: [{
+      name: '两家公司的对照',
+      unit: '百万元人民币',
+      header: ['项目', '公司 A（高增长）', '公司 B（低增长）'],
+      rows: [
+        SEC('一、经营（教学假设）'),                                                                // 2
+        R('营业收入', [G(28000), G(19500)]),                                                        // 3
+        R('营业收入（上年）', [G(21500), G(18700)]),                                                // 4
+        R('营业利润 EBIT', [G(3080), G(2535)]),                                                     // 5
+        R('折旧与摊销', [G(1820), G(780)]),                                                         // 6
+        R('EBITDA', [I('=B5+B6'), I('=C5+C6')], { style: 'tot' }),                                  // 7
+        R('资本开支', [G(2400), G(560)]),                                                           // 8
+        GAP(),                                                                                      // 9
+        SEC('二、债务与现金'),                                                                      // 10
+        R('有息负债合计', [G(26800), G(5200)]),                                                     // 11
+        R('货币资金', [G(3800), G(900)]),                                                           // 12
+        R('净债务', [I('=B11-B12'), I('=C11-C12')], { style: 'tot' }),                              // 13
+        R('全年利息支出', [G(1880), G(319)]),                                                       // 14
+        R('所得税', [G(300), G(554)]),                                                              // 15
+        R('FFO = EBITDA − 利息 − 所得税', [I('=B7-B14-B15'), I('=C7-C14-C15')], { style: 'tot' }),  // 16
+        GAP(),                                                                                      // 17
+        SEC('三、债权人看的四个比率'),                                                              // 18
+        R('净债务 / EBITDA（倍）', [I('=B13/B7'), I('=C13/C7')], { fmt: 'num2', style: 'tot' }),    // 19
+        R('EBITDA / 利息（倍）', [I('=B7/B14'), I('=C7/C14')], { fmt: 'num2', style: 'tot' }),      // 20
+        R('（EBITDA − 资本开支）/ 利息（倍）', [I('=(B7-B8)/B14'), I('=(C7-C8)/C14')], { fmt: 'num2' }), // 21
+        R('FFO / 净债务', [I('=B16/B13'), I('=C16/C13')], { fmt: 'pct1' }),                         // 22
+        GAP(),                                                                                      // 23
+        SEC('四、股东会怎么看'),                                                                    // 24
+        R('股东权益', [G(4600), G(14600)]),                                                         // 25
+        R('净利润', [I('=B5-B14-B15'), I('=C5-C14-C15')]),                                          // 26
+        R('ROE', [I('=B26/B25'), I('=C26/C25')], { fmt: 'pct1', style: 'tot' }),                    // 27
+        R('收入同比增速', [I('=B3/B4-1'), I('=C3/C4-1')], { fmt: 'pct1' }),                         // 28
+        GAP(),                                                                                      // 29
+        SEC('五、两个视角的结论'),                                                                  // 30
+        R('股东更喜欢谁（A = 1，B = 0）', [
+          I('=IF(B27>C27,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' }), E()
+        ], { fmt: 'num0' }),                                                                        // 31
+        R('债权人更喜欢谁（A = 1，B = 0）', [
+          I('=IF(B19<C19,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' }), E()
+        ], { fmt: 'num0' }),                                                                        // 32
+        R('A 的杠杆是 B 的几倍', [I('=B19/C19'), E()], { fmt: 'num2' }),                            // 33
+        R('B 的利息覆盖是 A 的几倍', [I('=C20/B20'), E()], { fmt: 'num2' }),                        // 34
+        GAP(),                                                                                      // 35
+        SEC('六、校验'),                                                                            // 36
+        R('校验：净债务/EBITDA × EBITDA − 净债务（应为 0）', [I('=B19*B7-B13'), I('=C19*C7-C13')], { style: 'tot' }) // 37
+      ]
+    }]
+  });
+
+  /* ==========================================================================
+   * 2. 契约测试与 headroom —— 中级
+   * ========================================================================*/
+  add({
+    id: 'cr-covenant', market: 'secondary', level: 2, type: 'credit',
+    companyId: null, industryId: null,
+    title: '债务契约：headroom 还剩多少，以及 EBITDA 加回的操纵空间',
+    subtitle: '契约不是"违约了才有用"，它的价值在于提前把控制权交到债权人手里',
+    minutes: 45, tags: ['财务契约', 'headroom', 'EBITDA 加回', 'covenant-lite', '交叉违约'],
+    intro:
+      '贷款协议里的**财务契约（covenant）**，本质是一组"如果你变差到某个程度，我就有权提前收回钱"的开关。\n\n' +
+      '它真正的作用不是事后追偿，而是**提前把控制权交到债权人手里**——' +
+      '在公司还没到还不上钱的时候，就让债权人有资格坐到谈判桌前，' +
+      '要求补充抵押、限制分红、或者干脆重新定价。\n\n' +
+      '所以信用分析里最重要的不是"现在有没有违约"，而是 **headroom：还能变差多少才触发**。\n\n' +
+      '这个模型有两层。\n\n' +
+      '**第一层**：三条常见契约（杠杆上限、覆盖下限、资本开支上限）逐条测试，' +
+      '算出每一条的 headroom，并找出**最紧的那一条**——因为约束你的永远是最紧的那条，不是平均水平。\n\n' +
+      '**第二层，也是这个模型真正的重点**：**EBITDA 是可以被定义出来的。**\n' +
+      '协议里的 "Adjusted EBITDA" 往往允许加回重组费用、股权激励、' +
+      '甚至"预计将实现的协同效应"（run-rate synergies）。' +
+      '模型会让你算：**同一家公司，用报表 EBITDA 和用协议口径 EBITDA，杠杆倍数差多少、headroom 差多少。**\n' +
+      '你会看到一家实际上已经踩线的公司，在协议口径下还有相当舒服的余量。' +
+      '这不是理论问题——2015 年之后高收益债市场的加回条款越来越宽松，是个被反复讨论的现象。',
+    objectives: [
+      '掌握维持性财务契约的测试方法，逐条判断是否通过',
+      '会计算每条契约的 headroom（还能恶化多少），并识别出最紧的那一条',
+      '理解 headroom 要用"触发所需的 EBITDA"倒算，而不是看当前值离阈值的差',
+      '理解协议口径 Adjusted EBITDA 与报表 EBITDA 的差异来源',
+      '能定量说明 EBITDA 加回对杠杆倍数与 headroom 的影响，并对加回项保持警惕'
+    ],
+    steps: [
+      { t: '第 1 步：算报表口径', d: '第 1 张表第 5–8 行。EBITDA、净债务、杠杆倍数、利息覆盖。' },
+      { t: '第 2 步：逐条测契约', d: '第 11–16 行。三条契约，每条用 IF 标记是否通过。' },
+      { t: '第 3 步：算 headroom', d: '第 19–23 行。倒算触发阈值所需的 EBITDA，再看现在离它还有多远。' },
+      { t: '第 4 步：找最紧的一条', d: '第 24 行。用 MIN 取三条 headroom 里最小的——那才是真正的约束。' },
+      { t: '第 5 步：搭协议口径 EBITDA', d: '第 2 张表第 3–9 行。报表 EBITDA 逐项加回，得到 Adjusted EBITDA。' },
+      { t: '第 6 步：对比两套口径', d: '第 12–16 行。杠杆倍数差多少倍？headroom 差多少个百分点？' },
+      { t: '第 7 步：判断', d: '第 19–21 行。报表口径下是否已违约？协议口径下呢？' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一家公司或任何一份具体的贷款协议。\n' +
+      '契约阈值（杠杆上限 4.0 倍、利息覆盖下限 3.0 倍）与加回项类型参照高收益债与' +
+      '杠杆贷款市场的常见条款设定；"预计协同效应加回"确有其事且长期存在争议，' +
+      '此处金额为教学假设。用于演示契约测试与 headroom 的计算方法，' +
+      '不构成对任何加回条款合理性的判断。单位：百万元人民币。',
+    takeaways: [
+      'headroom 必须用"触发阈值所需的 EBITDA"倒算，不能看当前值离阈值的差。杠杆契约 4.0 倍、当前 3.6 倍，看起来还有 0.4 倍余量，但换算成 EBITDA 只允许下滑 **10.0%**——**EBITDA 出现在分母上，杠杆倍数对它的变化是非线性的**。',
+      '三条契约的 headroom 分别是 10.0%、13.6% 和 19.6%，**约束你的是最紧的 10.0%**，不是平均的 14.4%。任何一条被触发，后果都是一样的：加速到期、交叉违约、控制权转移。**看契约包只看最紧的那条。**',
+      '同一家公司，报表 EBITDA 4,200、协议口径 5,180，**杠杆倍数从 3.60 倍降到 2.92 倍**，headroom 从 10.0% 扩大到 **27.0%**。加回项里最值得警惕的是"预计协同效应"——**它是一笔尚未发生、也可能永远不会发生的利润，却实实在在地放宽了今天的约束。**'
+    ],
+    sheets: [
+      {
+        name: '报表口径与契约测试',
+        unit: '百万元人民币',
+        header: ['项目', '数值'],
+        rows: [
+          SEC('一、报表口径（教学假设）'),                                                          // 2
+          R('营业利润 EBIT', [G(2700)]),                                                            // 3
+          R('折旧与摊销', [G(1500)]),                                                               // 4
+          R('报表 EBITDA', [I('=B3+B4')], { style: 'tot' }),                                        // 5
+          R('净债务', [G(15120)]),                                                                  // 6
+          R('全年利息支出', [G(1210)]),                                                             // 7
+          R('资本开支', [G(1350)]),                                                                 // 8
+          GAP(),                                                                                    // 9
+          SEC('二、当前比率'),                                                                      // 10
+          R('净债务 / EBITDA（倍）', [I('=B6/B5')], { fmt: 'num2', style: 'tot' }),                 // 11
+          R('EBITDA / 利息（倍）', [I('=B5/B7')], { fmt: 'num2', style: 'tot' }),                   // 12
+          R('资本开支 / 收入替代口径：资本开支 / EBITDA', [I('=B8/B5')], { fmt: 'pct1' }),          // 13
+          GAP(),                                                                                    // 14
+          SEC('三、契约测试'),                                                                      // 15
+          R('契约① 净债务/EBITDA 上限', [G(4.0)], { fmt: 'num2' }),                                 // 16
+          R('契约② EBITDA/利息 下限', [G(3.0)], { fmt: 'num2' }),                                   // 17
+          R('契约③ 资本开支/EBITDA 上限', [G(0.40)], { fmt: 'pct0' }),                              // 18
+          R('① 是否通过（1 = 通过）', [
+            I('=IF(B11<=B16,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' })
+          ], { fmt: 'num0' }),                                                                      // 19
+          R('② 是否通过（1 = 通过）', [
+            I('=IF(B12>=B17,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' })
+          ], { fmt: 'num0' }),                                                                      // 20
+          R('③ 是否通过（1 = 通过）', [
+            I('=IF(B13<=B18,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' })
+          ], { fmt: 'num0' }),                                                                      // 21
+          GAP(),                                                                                    // 22
+          SEC('四、headroom：EBITDA 还能跌多少'),                                                   // 23
+          R('触发① 所需的 EBITDA', [I('=B6/B16')]),                                                 // 24
+          R('① 的 headroom', [I('=1-B24/B5')], { fmt: 'pct1' }),                                    // 25
+          R('触发② 所需的 EBITDA', [I('=B7*B17')]),                                                 // 26
+          R('② 的 headroom', [I('=1-B26/B5')], { fmt: 'pct1' }),                                    // 27
+          R('触发③ 所需的 EBITDA', [I('=B8/B18')]),                                                 // 28
+          R('③ 的 headroom', [I('=1-B28/B5')], { fmt: 'pct1' }),                                    // 29
+          R('最紧的一条 headroom', [I('=MIN(B25,B27,B29)')], { fmt: 'pct1', style: 'tot' }),        // 30
+          R('三条的平均（这个数没有意义，放在这里做对比）', [I('=AVERAGE(B25,B27,B29)')], { fmt: 'pct1' }), // 31
+          GAP(),                                                                                    // 32
+          SEC('五、校验'),                                                                          // 33
+          R('校验：触发① 的 EBITDA × 契约上限 − 净债务（应为 0）', [I('=B24*B16-B6')], { style: 'tot' }), // 34
+          R('校验：触发② 的 EBITDA ÷ 利息 − 契约下限（应为 0）', [I('=B26/B7-B17')], { style: 'tot' })  // 35
+        ]
+      },
+      {
+        name: '协议口径 EBITDA',
+        unit: '百万元人民币',
+        header: ['项目', '数值'],
+        rows: [
+          SEC('一、从报表 EBITDA 加回到协议口径'),                                                  // 2
+          R('报表 EBITDA（引自第 1 张表）', [I("='报表口径与契约测试'!B5")], { style: 'tot' }),      // 3
+          R('加回：重组与关厂费用', [G(180)], { note: '教学假设' }),                                // 4
+          R('加回：股权激励费用', [G(240)], { note: '非现金，但确实是一项真实的股东成本' }),        // 5
+          R('加回：一次性诉讼和解', [G(120)], { note: '教学假设' }),                                // 6
+          R('加回：预计将实现的协同效应', [G(440)], { note: '尚未发生，争议最大的一类加回' }),      // 7
+          R('协议口径 Adjusted EBITDA', [I('=B3+B4+B5+B6+B7')], { style: 'tot' }),                  // 8
+          R('加回合计', [I('=B4+B5+B6+B7')]),                                                       // 9
+          R('加回占报表 EBITDA', [I('=B9/B3')], { fmt: 'pct1' }),                                   // 10
+          GAP(),                                                                                    // 11
+          SEC('二、两套口径下的杠杆与 headroom'),                                                   // 12
+          R('报表口径杠杆倍数', [I("='报表口径与契约测试'!B11")], { fmt: 'num2' }),                 // 13
+          R('协议口径杠杆倍数', [I("='报表口径与契约测试'!B6/B8")], { fmt: 'num2', style: 'tot' }), // 14
+          R('杠杆倍数被拉低了多少（倍）', [I('=B13-B14')], { fmt: 'num2' }),                        // 15
+          R('协议口径下触发杠杆契约所需的 Adjusted EBITDA', [I("='报表口径与契约测试'!B6/'报表口径与契约测试'!B16")]), // 16
+          R('协议口径下的 headroom', [I('=1-B16/B8')], { fmt: 'pct1', style: 'tot' }),               // 17
+          R('报表口径下的 headroom', [I("='报表口径与契约测试'!B25")], { fmt: 'pct1' }),            // 18
+          R('headroom 被放宽了多少（百分点）', [I('=(B17-B18)*100')], { fmt: 'num1', style: 'tot' }), // 19
+          GAP(),                                                                                    // 20
+          SEC('三、只算真实已发生的加回呢'),                                                        // 21
+          R('剔除"预计协同效应"后的 EBITDA', [I('=B8-B7')], { style: 'tot' }),                      // 22
+          R('对应杠杆倍数', [I("='报表口径与契约测试'!B6/B22")], { fmt: 'num2' }),                  // 23
+          R('对应 headroom', [I('=1-B16/B22')], { fmt: 'pct1' }),                                   // 24
+          R('单靠"预计协同效应"一项放宽的 headroom（百分点）', [I('=(B17-B24)*100')], { fmt: 'num1', style: 'tot' }), // 25
+          GAP(),                                                                                    // 26
+          SEC('四、校验'),                                                                          // 27
+          R('校验：报表 EBITDA + 加回合计 − 协议口径（应为 0）', [I('=B3+B9-B8')], { style: 'tot' }), // 28
+          R('校验：协议口径杠杆 × Adjusted EBITDA − 净债务（应为 0）', [I("=B14*B8-'报表口径与契约测试'!B6")], { style: 'tot' }) // 29
+        ]
+      }
+    ]
+  });
+
+  /* ==========================================================================
+   * 3. 违约回收瀑布 —— 复杂
+   * ========================================================================*/
+  add({
+    id: 'cr-recovery', market: 'secondary', level: 3, type: 'credit',
+    companyId: null, industryId: null,
+    title: '违约回收：同一家公司，你持有哪一层决定了一切',
+    subtitle: '公司只有一个企业价值，但债务有好几层——清偿顺序决定了谁全额拿回、谁血本无归',
+    minutes: 55, tags: ['回收率', '清偿顺序', '优先担保债', '次级债', '持续经营 vs 清算', '预期损失'],
+    intro:
+      '前两个模型回答"会不会违约"。这一个回答**"违约之后我能拿回多少"**。\n\n' +
+      '这两个问题的重要性其实是对等的。评级机构给一笔债的评级，' +
+      '同时取决于**违约概率**和**违约后的回收率**——' +
+      '所以同一家公司发行的不同债券，评级可以差好几个档。\n\n' +
+      '核心结构是**清偿瀑布**：企业在违约时的价值，按优先顺序一层层往下分。' +
+      '上一层没拿满之前，下一层一分钱拿不到。\n\n' +
+      '这里有三件事最容易被忽略：\n\n' +
+      '**第一，分的是"违约时的企业价值"，不是今天的市值。** ' +
+      '公司走到违约那一步，价值通常已经大幅缩水了。用今天的估值去算回收率是最常见的错误。\n\n' +
+      '**第二，持续经营价值和清算价值差别巨大。** ' +
+      '能作为整体卖掉（going concern），价值通常远高于拆开变卖资产（liquidation）。' +
+      '模型会把两种口径都算一遍。\n\n' +
+      '**第三，中间层最脆弱。** 优先担保层几乎总能拿满，最次级层几乎总是归零，' +
+      '**而夹在中间的那一层，回收率对企业价值的假设极度敏感**——' +
+      '企业价值动一点，它的回收率能从 90% 掉到 20%。这一层才是信用分析真正的战场。\n\n' +
+      '最后一节把违约概率和回收率合起来算**预期损失**，' +
+      '你会看到：一笔高票息的次级债，扣掉预期损失之后可能还不如低票息的优先债。',
+    objectives: [
+      '掌握清偿瀑布的计算：按优先级逐层分配，上层未满则下层为零',
+      '理解违约时企业价值与当前市值的区别，以及持续经营价值与清算价值的差异',
+      '会计算各层债务的回收率，并识别出对企业价值最敏感的那一层',
+      '理解为什么同一发行人的不同债券可以有完全不同的评级',
+      '会用违约概率 × 违约损失率计算预期损失，并用它比较不同层级债券的风险调整后收益'
+    ],
+    steps: [
+      { t: '第 1 步：定违约时的企业价值', d: '第 1 张表第 3–8 行。用违约时 EBITDA × 困境倍数，同时算出清算口径做对照。' },
+      { t: '第 2 步：排债务结构', d: '第 11–15 行。三层债务，从优先担保到次级。' },
+      { t: '第 3 步：做持续经营瀑布', d: '第 2 张表第 3–11 行。逐层分配：本层能分到的 = MIN(本层债权, 剩余价值)。' },
+      { t: '第 4 步：算回收率', d: '第 13–15 行。各层分到的金额 ÷ 各层债权。' },
+      { t: '第 5 步：换清算口径再来一遍', d: '第 18–26 行。同样的瀑布，换一个更低的企业价值。' },
+      { t: '第 6 步：找最敏感的一层', d: '第 29–32 行。两种口径下各层回收率的变化幅度，谁摆动最大？' },
+      { t: '第 7 步：算预期损失', d: '第 3 张表。违约概率 × (1 − 回收率) = 预期损失率，再和票息比。' },
+      { t: '第 8 步：下结论', d: '第 3 张表最后。风险调整后，哪一层其实更划算？' }
+    ],
+    dataNote:
+      '**全部为教学假设数据**，不对应任何一家公司或任何一笔具体债券。\n' +
+      '债务分层结构、困境倍数与违约概率均为教学设定，量级参照高收益债市场的常见情形' +
+      '（困境情形下的 EV/EBITDA 倍数通常显著低于正常经营时；优先担保债的历史回收率' +
+      '普遍高于无担保与次级债）。用于演示清偿瀑布与预期损失的计算方法，' +
+      '不构成对任何债券的信用判断。单位：百万元人民币。',
+    takeaways: [
+      '同一家公司、同一次违约，优先担保债回收 **100%**、优先无担保债回收 **64.0%**、次级债回收 **0%**。**"这家公司的回收率"这个说法本身就是错的**——回收率是债项属性，不是发行人属性。这也是为什么同一发行人的不同债券评级可以差好几档。',
+      '从持续经营口径换到清算口径，企业价值下降 31.3%，但**三层的反应完全不同**：优先担保仍是 100%（纹丝不动），次级仍是 0%（本来就没有），而中间的优先无担保从 64.0% 掉到 **18.9%，整整 45 个百分点**。**企业价值的每一分变化，都由中间层独自承担**——它上面有人垫底、下面没人接盘。这一层才是信用分析真正的战场。',
+      '次级债票息 12.0%，比优先无担保的 7.5% 多出 4.5 个百分点，看起来诱人。但两者违约概率相同（同一个发行人），回收率却是 0% 对 64%——次级债的预期损失率 **12.00%**、优先无担保只有 **4.32%**，差了 7.68 个百分点。**多付的 4.5 个点，补不上多出来的 7.68 个点**：风险调整后次级债 0.00%、优先无担保 3.18%。票息是明码标价的，预期损失要你自己算。'
+    ],
+    sheets: [
+      {
+        name: '违约时的价值与债务结构',
+        unit: '百万元人民币',
+        header: ['项目', '数值'],
+        rows: [
+          SEC('一、违约时的企业价值（教学假设）'),                                                  // 2
+          R('正常经营时的 EBITDA', [G(4200)], { note: '沿用契约模型的量级' }),                      // 3
+          R('违约时的 EBITDA（已恶化）', [G(2400)]),                                                // 4
+          R('困境情形下的 EV/EBITDA 倍数', [G(4.5)], { fmt: 'num1', note: '显著低于正常经营时的倍数' }), // 5
+          R('持续经营价值 Going Concern', [I('=B4*B5')], { style: 'tot' }),                         // 6
+          GAP(),                                                                                    // 7
+          SEC('二、清算口径对照'),                                                                  // 8
+          R('存货变现价值', [G(1800)]),                                                             // 9
+          R('应收账款变现价值', [G(2200)]),                                                         // 10
+          R('固定资产变现价值', [G(3900)]),                                                         // 11
+          R('清算费用', [G(-480)], { note: '负数' }),                                               // 12
+          R('清算价值 Liquidation', [I('=B9+B10+B11+B12')], { style: 'tot' }),                      // 13
+          R('清算价值相对持续经营价值', [I('=B13/B6-1')], { fmt: 'pct1' }),                         // 14
+          GAP(),                                                                                    // 15
+          SEC('三、债务结构（按清偿顺序）'),                                                        // 16
+          R('第 1 层：优先担保债', [G(6000)]),                                                      // 17
+          R('第 2 层：优先无担保债', [G(7500)]),                                                    // 18
+          R('第 3 层：次级债', [G(3000)]),                                                          // 19
+          R('债务合计', [I('=B17+B18+B19')], { style: 'tot' }),                                     // 20
+          R('持续经营价值 ÷ 债务合计', [I('=B6/B20')], { fmt: 'pct1' }),                            // 21
+          R('清算价值 ÷ 债务合计', [I('=B13/B20')], { fmt: 'pct1' })                                // 22
+        ]
+      },
+      {
+        name: '清偿瀑布与回收率',
+        unit: '百万元人民币',
+        header: ['项目', '持续经营口径', '清算口径'],
+        rows: [
+          SEC('一、可供分配的价值'),                                                                // 2
+          R('企业价值', [I("='违约时的价值与债务结构'!B6"), I("='违约时的价值与债务结构'!B13")], { style: 'tot' }), // 3
+          GAP(),                                                                                    // 4
+          SEC('二、第 1 层：优先担保债'),                                                           // 5
+          R('债权金额', [I("='违约时的价值与债务结构'!B17"), I("='违约时的价值与债务结构'!B17")]),  // 6
+          R('本层分得', [I('=MIN(B6,B3)'), I('=MIN(C6,C3)')], { style: 'tot' }),                    // 7
+          R('剩余价值', [I('=B3-B7'), I('=C3-C7')]),                                                // 8
+          GAP(),                                                                                    // 9
+          SEC('三、第 2 层：优先无担保债'),                                                         // 10
+          R('债权金额', [I("='违约时的价值与债务结构'!B18"), I("='违约时的价值与债务结构'!B18")]),  // 11
+          R('本层分得', [I('=MIN(B11,B8)'), I('=MIN(C11,C8)')], { style: 'tot' }),                  // 12
+          R('剩余价值', [I('=B8-B12'), I('=C8-C12')]),                                              // 13
+          GAP(),                                                                                    // 14
+          SEC('四、第 3 层：次级债'),                                                               // 15
+          R('债权金额', [I("='违约时的价值与债务结构'!B19"), I("='违约时的价值与债务结构'!B19")]),  // 16
+          R('本层分得', [I('=MIN(B16,B13)'), I('=MIN(C16,C13)')], { style: 'tot' }),                // 17
+          R('剩余价值（归股东）', [I('=B13-B17'), I('=C13-C17')]),                                  // 18
+          GAP(),                                                                                    // 19
+          SEC('五、各层回收率'),                                                                    // 20
+          R('第 1 层回收率', [
+            I('=B7/B6', { bounds: [0, 1], boundsNote: '回收率不可能为负，也不可能超过 100%——上限就是这一层的债权金额。算出超过 100% 说明分配时没有用 MIN 截断。' }),
+            I('=C7/C6', { bounds: [0, 1] })
+          ], { fmt: 'pct1', style: 'tot' }),                                                        // 21
+          R('第 2 层回收率', [
+            I('=B12/B11', { bounds: [0, 1] }), I('=C12/C11', { bounds: [0, 1] })
+          ], { fmt: 'pct1', style: 'tot' }),                                                        // 22
+          R('第 3 层回收率', [
+            I('=B17/B16', { bounds: [0, 1] }), I('=C17/C16', { bounds: [0, 1] })
+          ], { fmt: 'pct1', style: 'tot' }),                                                        // 23
+          GAP(),                                                                                    // 24
+          SEC('六、哪一层最敏感'),                                                                  // 25
+          R('企业价值下降幅度', [I('=C3/B3-1'), E()], { fmt: 'pct1' }),                             // 26
+          R('第 1 层回收率变化（百分点）', [I('=(C21-B21)*100'), E()], { fmt: 'num1' }),            // 27
+          R('第 2 层回收率变化（百分点）', [I('=(C22-B22)*100'), E()], { fmt: 'num1', style: 'tot' }), // 28
+          R('第 3 层回收率变化（百分点）', [I('=(C23-B23)*100'), E()], { fmt: 'num1' }),            // 29
+          GAP(),                                                                                    // 30
+          SEC('七、校验'),                                                                          // 31
+          R('校验：三层分得之和 + 归股东 − 企业价值（应为 0）',
+            [I('=B7+B12+B17+B18-B3'), I('=C7+C12+C17+C18-C3')], { style: 'tot' })                   // 32
+        ]
+      },
+      {
+        name: '预期损失与风险调整',
+        unit: '百万元人民币',
+        header: ['项目', '优先无担保债', '次级债'],
+        rows: [
+          SEC('一、票息（教学假设）'),                                                              // 2
+          R('票面利率', [G(0.075, { fmt: 'pct1' }), G(0.120, { fmt: 'pct1' })]),                    // 3
+          GAP(),                                                                                    // 4
+          SEC('二、违约概率与回收率'),                                                              // 5
+          R('一年期违约概率 PD', [
+            G(0.12, { fmt: 'pct1', note: '同一发行人，两层债务的违约概率相同；此处按已陷入困境的信用设定' }),
+            G(0.12, { fmt: 'pct1' })
+          ]),                                                                                       // 6
+          R('回收率（持续经营口径，引自第 2 张表）',
+            [I("='清偿瀑布与回收率'!B22"), I("='清偿瀑布与回收率'!B23")], { fmt: 'pct1' }),          // 7
+          R('违约损失率 LGD = 1 − 回收率', [I('=1-B7'), I('=1-C7')], { fmt: 'pct1' }),              // 8
+          GAP(),                                                                                    // 9
+          SEC('三、预期损失'),                                                                      // 10
+          R('预期损失率 = PD × LGD', [I('=B6*B8'), I('=C6*C8')], { fmt: 'pct2', style: 'tot' }),    // 11
+          R('风险调整后收益 = 票息 − 预期损失率', [I('=B3-B11'), I('=C3-C11')], { fmt: 'pct2', style: 'tot' }), // 12
+          GAP(),                                                                                    // 13
+          SEC('四、结论'),                                                                          // 14
+          R('票息差（次级 − 优先无担保，百分点）', [I('=(C3-B3)*100'), E()], { fmt: 'num1' }),      // 15
+          R('预期损失差（次级 − 优先无担保，百分点）', [I('=(C11-B11)*100'), E()], { fmt: 'num1' }), // 16
+          R('风险调整后哪个更好（优先无担保 = 1）', [
+            I('=IF(B12>C12,1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' }), E()
+          ], { fmt: 'num0', style: 'tot' }),                                                        // 17
+          R('高票息那一层多付的利息，够不够补偿多出来的预期损失（1 = 够）', [
+            I('=IF((C3-B3)>=(C11-B11),1,0)', { bounds: [0, 1], boundsNote: '这是一个 0/1 标记，只可能是 0 或 1。' }), E()
+          ], { fmt: 'num0' }),                                                                      // 18
+          GAP(),                                                                                    // 19
+          SEC('五、校验'),                                                                          // 20
+          R('校验：回收率 + 违约损失率 − 1（应为 0）', [I('=B7+B8-1'), I('=C7+C8-1')], { style: 'tot' }) // 21
         ]
       }
     ]
@@ -12832,11 +14623,24 @@ window.FML_CONFIG = {
     }
   ];
 
-  /* 不在主线上的专题：口径体系与主线差异太大，按需单学 */
+  /* 不在主线上的专题：口径体系与主线差异太大，按需单学。
+     这四条支线各自内部是有顺序的（简单 → 中级 → 复杂），但支线之间互不依赖。 */
   DB.pathExtras = [
     { id: 'cmb-nii', note: '银行支线第 1 步。银行没有营业成本和毛利率，资产负债表本身就是产品：净利息收入 = 生息资产 × 净息差。' },
     { id: 'cmb-nim', note: '银行支线第 2 步。把净利息收入的变动拆成规模效应和价格效应，并看清拨备是怎么调节利润的。' },
-    { id: 'cmb-full', note: '银行支线第 3 步。完整盈利预测 + 信用成本校准 + PB–ROE 估值。整套口径与主线不通用，建议在完成阶段 2 之后按需单学。' }
+    { id: 'cmb-full', note: '银行支线第 3 步。完整盈利预测 + 信用成本校准 + PB–ROE 估值。整套口径与主线不通用，建议在完成阶段 2 之后按需单学。' },
+
+    { id: 'ins-cor', note: '保险支线第 1 步。财险的"毛利率"叫综合成本率，越低越好，超过 100% 也不代表公司亏钱——先把这套反直觉的口径建立起来。' },
+    { id: 'ins-ev-nbv', note: '保险支线第 2 步。寿险为什么不能用市盈率：内含价值 EV 回答清算问题，新业务价值 NBV 回答成长问题。保费不变、渠道结构一变，NBV 掉两成。' },
+    { id: 'ins-ev-movement', note: '保险支线第 3 步。EV 变动分析：六项里只有两项可重复。报表 EV 跌 2.2%，剥掉偏差后底层是涨 8.6%——看哪个数，结论完全相反。' },
+
+    { id: 're-noi-cap', note: '不动产支线第 1 步。估值只有一个公式：价值 = NOI ÷ Cap Rate。难的是 NOI 的口径（不扣利息折旧税与资本开支）和 Cap Rate 的来源（观察值，不是算出来的）。' },
+    { id: 're-dscr', note: '不动产支线第 2 步。视角切到贷款人：LTV、DSCR、债务收益率。重点是看懂"拉长摊还期让 DSCR 变好看"这种结构性粉饰，以及为什么债务收益率识破得了它。' },
+    { id: 're-dev-irr', note: '不动产支线第 3 步。开发项目没有终值，利润是既定的，回报率完全由回款时间决定。销售推迟一年、货值一分不少，股权 IRR 掉 16.7 个百分点。' },
+
+    { id: 'cr-leverage', note: '信用支线第 1 步。债权人收益封顶、损失不封顶，所以只看下行。同一组数据，股东选 A、债权人选 B——先理解这个不对称。' },
+    { id: 'cr-covenant', note: '信用支线第 2 步。契约的价值在于提前把控制权交给债权人，所以关键是 headroom 还剩多少。再看协议口径 Adjusted EBITDA 能把 headroom 放宽到什么程度。' },
+    { id: 'cr-recovery', note: '信用支线第 3 步。违约之后能拿回多少：清偿瀑布、各层回收率、预期损失。回收率是债项属性不是发行人属性——这是全站唯一一个把"同一家公司不同债券差好几档评级"讲清楚的模型。' }
   ];
 
   /* ------------------------------------------------------------------
@@ -12974,18 +14778,15 @@ window.FML_CONFIG = {
 
   function cellFmt(sheet, row, cell) { return (cell && cell.fmt) || row.fmt || undefined; }
 
-  function nearEnough(a, b) {
-    if (typeof a !== 'number' || typeof b !== 'number') return false;
-    if (!isFinite(a) || !isFinite(b)) return false;
-    return Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 0.002);
-  }
+  /* 判定统一走 grade.js，容差也在那里定义，避免三处各写一份又互相飘。 */
+  const nearEnough = Grade.near;
 
   /* =========================================================================
    * 应用状态
    * =======================================================================*/
   const S = {
     filterMarket: 'all', filterLevel: 'all', filterIndustry: 'all',
-    model: null, sheetIdx: 0, actInfo: null, inputs: {}, wb: null, sol: null,
+    model: null, sheetIdx: 0, actInfo: null, inputs: {}, wb: null, sol: null, grader: null,
     showChecks: false, hintFor: null, startTs: 0
   };
 
@@ -14011,6 +15812,7 @@ window.FML_CONFIG = {
     const m = S.model;
     S.wb = new FML.Workbook(m, makeGetter(m, S.inputs, false));
     S.sol = new FML.Workbook(m, makeGetter(m, {}, true));
+    S.grader = Grade.build(m, S.inputs);
   }
 
   function renderTabs() {
@@ -14050,6 +15852,7 @@ window.FML_CONFIG = {
       revealed: Store.model(S.model.id).revealed || {},
       getWb: function () { return S.wb; },
       getSol: function () { return S.sol; },
+      getGrader: function () { return S.grader; },
       showChecks: function () { return S.showChecks; },
       fmtVal: fmtVal,
       onChange: function (sheetName, col, row, val) { setInput(sheetName, col, row, val); },
@@ -14109,6 +15912,7 @@ window.FML_CONFIG = {
     if ((S.inputs[key] || '') === v) return;
     if (v === '') delete S.inputs[key]; else S.inputs[key] = v;
     Store.setInput(S.model.id, key, v, { sheet: S.sheetIdx });
+    S.wb.reset(); S.sol.reset(); S.grader.reset();
     updateProgress();
     flashSaved();
   }
@@ -14126,25 +15930,9 @@ window.FML_CONFIG = {
   }
 
   function scoreAll() {
-    const m = S.model;
-    S.wb.reset(); S.sol.reset();
-    let correct = 0, total = 0;
-    m.sheets.forEach(function (sh) {
-      sh.rows.forEach(function (r, ri) {
-        const rowNum = ri + 2;
-        (r.cells || []).forEach(function (cell, ci) {
-          if (!cell || cell.kind !== 'input') return;
-          total++;
-          const col = ci + 1;
-          const key = sh.name + '!' + FML.addr(col, rowNum);
-          if (!S.inputs[key]) return;
-          const a = S.wb.tryGet(sh.name, col, rowNum);
-          const b = S.sol.tryGet(sh.name, col, rowNum);
-          if (a.ok && b.ok && nearEnough(a.v, b.v)) correct++;
-        });
-      });
-    });
-    return { correct: correct, total: total };
+    /* 判定结果在 grader 里按格缓存，只有 setInput 会让它失效。
+       renderSide 每次选格都会调到这里，不能每次都重算全表。 */
+    return S.grader.scan();
   }
 
   function updateProgress() {
@@ -14195,14 +15983,19 @@ window.FML_CONFIG = {
       const key = sh.name + '!' + di.addr;
       const raw = S.inputs[key] || '';
       if (raw) {
-        S.wb.reset(); S.sol.reset();
-        const ur = S.wb.tryGet(sh.name, di.col, di.row);
+        const vd = S.grader.of(sh.name, di.col, di.row);
         const sr = S.sol.tryGet(sh.name, di.col, di.row);
-        if (sr.ok && !(ur.ok && nearEnough(ur.v, sr.v))) {
+        if (sr.ok && !vd.ok) {
+          const ur = S.wb.tryGet(sh.name, di.col, di.row);
+          /* 格式写在行上、单元格可以覆盖，和表格渲染取的是同一条规则 */
+          const dfmt = cellFmt(sh, sh.rows[di.row - 2] || {}, di.def);
           const list = Diag.analyze({
             sheetName: sh.name, label: di.label,
             userRaw: raw, userVal: ur.ok ? ur.v : null, userErr: ur.ok ? null : ur.err,
             solRaw: di.def.sol, solVal: sr.v,
+            verdict: vd.code, refVal: vd.refVal, yourVal: vd.yourVal,
+            bounds: di.def.bounds, boundsNote: di.def.boundsNote,
+            fmtVal: function (v) { return fmtVal(v, dfmt); },
             evalIn: function (f) {
               try {
                 return FML.evaluate(FML.compile(String(f).replace(/^=/, '')),
@@ -14210,10 +16003,14 @@ window.FML_CONFIG = {
               } catch (e) { return null; }
             }
           });
+          /* 值本身是对的（写死 / 公式不等价）时，别把它显示成红色的「你的结果」，
+             那会让学生以为数算错了，而错的其实是得到这个数的方式。 */
+          const valueRight = (vd.code === 'const' || vd.code === 'nonequiv');
           diagHTML = '<div class="side-sec"><div class="st">诊断 · ' + esc(di.addr) + '</div>' +
             '<div class="diag-box">' +
-              '<div class="diag-cmp"><span>你的结果</span><b class="bad">' + esc(fmtVal(ur.ok ? ur.v : '#ERR', di.def.fmt)) + '</b>' +
-              '<span>参考答案</span><b class="ok">' + esc(fmtVal(sr.v, di.def.fmt)) + '</b></div>' +
+              '<div class="diag-cmp"><span>你的结果</span><b class="' + (valueRight ? 'ok' : 'bad') + '">' +
+                esc(fmtVal(ur.ok ? ur.v : '#ERR', dfmt)) + '</b>' +
+              '<span>参考答案</span><b class="ok">' + esc(fmtVal(sr.v, dfmt)) + '</b></div>' +
               list.map(function (x, i) {
                 return '<div class="diag-item"' + (i === 0 ? ' data-top="1"' : '') + '>' +
                   '<b>' + esc(x.t) + '</b><span>' + esc(x.d) + '</span></div>';
@@ -14272,8 +16069,38 @@ window.FML_CONFIG = {
       '<div class="side-sec"><div class="st">做完之后应该看懂什么</div>' +
         m.takeaways.map((t) => '<div class="callout info" style="font-size:12.5px">' + esc(t) + '</div>').join('') +
       '</div>' +
-      '<div class="side-sec"><div class="st">数据说明</div><div class="footnote">' + esc(m.dataNote) + '</div></div>' +
+      '<div class="side-sec"><div class="st">数据说明</div>' +
+        provHTML(m) +
+        '<div class="footnote">' + esc(m.dataNote) + '</div></div>' +
       (m.companyId ? '<div class="side-sec"><a class="btn" style="width:100%;justify-content:center" href="#/company/' + m.companyId + '">查看公司案例背景与财报分析 →</a></div>' : '');
+  }
+
+  /* 数据口径条。币种、量级、财年口径全部从 sheet.unit 和表头推出来，
+     不是手写的，所以不会写着写着和数据对不上。
+     只有人能填的部分（原文链接、页码、截止日）如实标「未标注」，不编。 */
+  function provHTML(m) {
+    if (!window.Prov) return '';
+    const line = Prov.summary(m);
+    const src = m.source || {};
+    let html = '';
+    if (line) html += '<div class="prov-line">' + esc(line) + '</div>';
+    if (src.docs && src.docs.length) {
+      html += '<div class="prov-docs">' + src.docs.map(function (d) {
+        const bits = [d.title, d.period, d.statement, d.page ? '第 ' + d.page + ' 页' : null]
+          .filter(Boolean).map(esc).join(' · ');
+        return d.url
+          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a></div>'
+          : '<div>' + bits + '</div>';
+      }).join('') + '</div>';
+    }
+    /* 缺口只在「已经声明了 source 但填了一半」时提示。
+       一个 source 都没声明的模型不在这里唠叨——56 个模型页页挂一行警告是噪声，
+       那份清单属于开发期的 verifySource()，是拿来干活的，不是拿来给学生看的。 */
+    if (m.source) {
+      const gaps = Prov.gaps(m);
+      if (gaps.length) html += '<div class="prov-gap">溯源信息未标注：' + esc(gaps.join('、')) + '</div>';
+    }
+    return html;
   }
 
   /* =========================================================================

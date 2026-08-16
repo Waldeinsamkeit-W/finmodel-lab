@@ -4,8 +4,10 @@
  * 普通网页里 a[download] 就够了。但这个页面也会以 claude.ai 制品的形式跑在
  * 带 sandbox 的 iframe 里（sandbox="allow-scripts allow-same-origin allow-forms"，
  * 没有 allow-downloads）——那里浏览器会直接拦掉页面自己发起的下载：不报错、
- * 不下载、什么都不发生。宿主为此给了 window.claude.downloads 通道，走它才会
- * 弹出保存确认框。
+ * 不下载、什么都不发生。宿主为此给了一个下载通道，走它才会弹出保存确认框。
+ *
+ * 通道要用 claude.use('downloads') 拿，而且是异步的；拿不到就是 null
+ * （没开这个能力、或压根不在制品里），不要去探测 window.claude 上的成员。
  *
  * 所以：有宿主通道就走宿主通道，没有就退回 a[download]。
  * ==========================================================================*/
@@ -13,9 +15,16 @@
   'use strict';
   const Save = {};
 
+  /* 只解析一次，之后复用。拿不到一律当 null 处理，让调用方走降级分支。 */
+  let hostP = null;
   function host() {
-    const c = global.claude;
-    return (c && c.downloads && typeof c.downloads.save === 'function') ? c.downloads : null;
+    if (!hostP) {
+      const c = global.claude;
+      hostP = (c && typeof c.use === 'function')
+        ? Promise.resolve().then(function () { return c.use('downloads'); }).catch(function () { return null; })
+        : Promise.resolve(null);
+    }
+    return hostP;
   }
 
   /* 是否被嵌在别人的 iframe 里。sandbox 标志没法从内部查询，
@@ -24,9 +33,12 @@
     try { return global.self !== global.top; } catch (e) { return true; }
   }
 
+  /** 返回 Promise<'host' | 'blocked' | 'anchor'>。通道要异步解析，所以这里也是异步的。 */
   Save.channel = function () {
-    if (host()) return 'host';
-    return embedded() ? 'blocked' : 'anchor';
+    return host().then(function (h) {
+      if (h) return 'host';
+      return embedded() ? 'blocked' : 'anchor';
+    });
   };
 
   /* 宿主对扩展名有白名单，.xlsx 不一定在里面。被拒时补一个允许的后缀再存一次
@@ -57,39 +69,36 @@
    * renamed = true 表示宿主不收这个扩展名，已换名保存，需要提示用户改回来。
    */
   Save.file = function (blob, filename) {
-    const h = host();
-    if (h) {
-      /* Blob 会被复制（不像 ArrayBuffer 会被转移），失败后可以直接重试 */
-      return h.save({ filename: filename, data: blob })
-        .then(function () { return { filename: filename, size: blob.size, renamed: false }; })
-        .catch(function (err) {
-          const code = err && err.code;
-          if (code !== 'rejected_extension' && code !== 'extension_not_enabled') throw toError(err);
-          const alt = filename + FALLBACK_EXT;
-          return h.save({ filename: alt, data: blob }).then(function () {
-            return { filename: alt, size: blob.size, renamed: true, original: filename };
-          }).catch(function (e2) { throw toError(e2); });
-        });
-    }
+    return host().then(function (h) {
+      if (h) {
+        /* Blob 会被复制（不像 ArrayBuffer 会被转移），失败后可以直接重试 */
+        return h.save({ filename: filename, data: blob })
+          .then(function () { return { filename: filename, size: blob.size, renamed: false }; })
+          .catch(function (err) {
+            const code = err && err.code;
+            if (code !== 'rejected_extension' && code !== 'extension_not_enabled') throw toError(err);
+            const alt = filename + FALLBACK_EXT;
+            return h.save({ filename: alt, data: blob }).then(function () {
+              return { filename: alt, size: blob.size, renamed: true, original: filename };
+            }).catch(function (e2) { throw toError(e2); });
+          });
+      }
 
-    if (embedded()) {
-      const e = new Error('这个页面被嵌在不允许下载的框架里。请在新标签页单独打开本页，或用本地版本导出。');
-      e.code = 'sandboxed';
-      return Promise.reject(e);
-    }
+      if (embedded()) {
+        const e = new Error('这个页面被嵌在不允许下载的框架里。请在新标签页单独打开本页，或用本地版本导出。');
+        e.code = 'sandboxed';
+        throw e;
+      }
 
-    return new Promise(function (resolve, reject) {
-      try {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.rel = 'noopener';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
-        resolve({ filename: filename, size: blob.size, renamed: false });
-      } catch (err) { reject(err); }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+      return { filename: filename, size: blob.size, renamed: false };
     });
   };
 
