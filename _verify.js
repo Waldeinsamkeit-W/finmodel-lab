@@ -6,6 +6,8 @@
  *   2. 找出标签里带「校验 / 差额 / 应为 0」的行，断言其值为 0；
  *   3. 找出算出 NaN / Infinity 的格子。
  * 用法：<script src="_verify.js"></script> 后 verifyAll() 或 verifyAll('模型id')
+ *
+ * 另有 verifyGrading()，查的是判定机制本身（grade.js）而不是数据，见文件末尾。
  * ==========================================================================*/
 (function (global) {
   'use strict';
@@ -57,7 +59,7 @@
 
   function verify(m) {
     const wb = new global.FML.Workbook(m, getter(m));
-    const errs = [], checks = [], nans = [];
+    const errs = [], checks = [], nans = [], bounds = [];
     let dangling = [];
     let inputs = 0;
 
@@ -84,12 +86,21 @@
             if (want !== null && Math.abs(res.v - want) > TOL) {
               checks.push({ sheet: sh.name, addr: addr, label: lbl, want: want, got: res.v });
             }
+            /* 声明了 bounds 的格子，参考答案自己必须落在界内。
+               不成立说明界写错了——放着不管，学生填对反而会看到「超出范围」。 */
+            if (c.bounds) {
+              const lo = (c.bounds[0] === null || c.bounds[0] === undefined) ? -Infinity : c.bounds[0];
+              const hi = (c.bounds[1] === null || c.bounds[1] === undefined) ? Infinity : c.bounds[1];
+              if (res.v < lo || res.v > hi) {
+                bounds.push({ sheet: sh.name, addr: addr, label: lbl, bounds: c.bounds, got: res.v });
+              }
+            }
           }
         });
       });
     });
 
-    return { id: m.id, level: m.level, type: m.type, inputs: inputs, errs: errs, checks: checks, nans: nans, dangling: dangling };
+    return { id: m.id, level: m.level, type: m.type, inputs: inputs, errs: errs, checks: checks, nans: nans, dangling: dangling, bounds: bounds };
   }
 
   global.verifyAll = function (only) {
@@ -97,7 +108,7 @@
     const bad = [], ok = [];
     list.forEach(function (m) {
       const r = verify(m);
-      if (r.errs.length || r.checks.length || r.nans.length || r.dangling.length) bad.push(r); else ok.push(r);
+      if (r.errs.length || r.checks.length || r.nans.length || r.dangling.length || r.bounds.length) bad.push(r); else ok.push(r);
     });
     return {
       total: list.length,
@@ -109,4 +120,130 @@
   };
 
   global.verifyOne = function (id) { return verify(global.DB.models.filter(function (m) { return m.id === id; })[0]); };
+
+  /* ==========================================================================
+   * verifyGrading() —— 判定机制自身的回归测试（grade.js）
+   *
+   * 对每一个作答格跑两遍，两个方向的错各查一次：
+   *
+   *   误伤：把参考公式原样填进去，必须判对。
+   *         这个数必须是 0。判错正确答案比放过一个写死的严重得多——
+   *         学生会开始不信任批改结果，整个站就废了。
+   *
+   *   漏网：把参考答案的数值写死填进去，必须判错。
+   *         参考答案本身就是常数的格子（「填入你的假设」）不算，
+   *         那种格子填常数本来就合法。
+   * ========================================================================*/
+  function solRefCount(sol, sheetName) {
+    const s = String(sol === undefined || sol === null ? '' : sol).trim().replace(/^[=＝]/, '');
+    return s ? global.FML.refsOf(s, sheetName).length : 0;
+  }
+
+  function inputCells(m) {
+    const out = [];
+    m.sheets.forEach(function (sh) {
+      sh.rows.forEach(function (r, ri) {
+        (r.cells || []).forEach(function (c, ci) {
+          if (c && c.kind === 'input') {
+            out.push({ sheet: sh.name, col: ci + 1, row: ri + 2, def: c, label: r.label || '' });
+          }
+        });
+      });
+    });
+    return out;
+  }
+
+  /* ==========================================================================
+   * verifySource() —— 数据口径与溯源盘点
+   *
+   * 币种 / 量级 / 财年口径是从 sheet.unit 和表头推出来的，推不出来才是问题；
+   * 原文链接、页码、截止日只能人填，缺就列出来，不替它编。
+   * ========================================================================*/
+  global.verifySource = function () {
+    const rows = global.DB.models.map(function (m) {
+      const d = global.Prov.derive(m);
+      return {
+        id: m.id, type: m.type,
+        口径: global.Prov.summary(m),
+        推不出币种: !d.currencies.length,
+        推不出量级: !d.scales.length,
+        多币种: d.multiCurrency,
+        缺: global.Prov.gaps(m)
+      };
+    });
+    const tally = {};
+    rows.forEach(function (r) { r.缺.forEach(function (g) { tally[g] = (tally[g] || 0) + 1; }); });
+    return {
+      models: rows.length,
+      口径可推出: rows.filter(function (r) { return !r.推不出币种 && !r.推不出量级; }).length,
+      推不出币种: rows.filter(function (r) { return r.推不出币种; }).map(function (r) { return r.id; }),
+      推不出量级: rows.filter(function (r) { return r.推不出量级; }).map(function (r) { return r.id; }),
+      多币种模型: rows.filter(function (r) { return r.多币种; }).map(function (r) { return r.id; }),
+      缺口统计: tally,
+      rows: rows
+    };
+  };
+
+  global.verifyGrading = function (only) {
+    const FMLg = global.FML, G = global.Grade;
+    const list = global.DB.models.filter(function (m) { return !only || m.id === only; });
+    const missed = [], harmed = [], blind = [];
+    let cells = 0, exempt = 0;
+
+    list.forEach(function (m) {
+      const solWb = new FMLg.Workbook(m, FMLg.makeGetter(m, {}, true));
+      const keys = inputCells(m);
+      const inputs = {};
+      keys.forEach(function (k) { inputs[k.sheet + '!' + FMLg.addr(k.col, k.row)] = String(k.def.sol); });
+
+      /* --- 方向一：全填参考公式，应当全对 --- */
+      const g = G.build(m, inputs);
+      keys.forEach(function (k) {
+        cells++;
+        const v = g.of(k.sheet, k.col, k.row);
+        if (!v.ok) {
+          harmed.push({
+            id: m.id, sheet: k.sheet, addr: FMLg.addr(k.col, k.row),
+            label: k.label, code: v.code, sol: k.def.sol, err: v.err
+          });
+        }
+      });
+
+      /* --- 原理盲区：参考答案本身就是与数据无关的常数 --- */
+      keys.forEach(function (k) {
+        if (g.invariant(k.sheet, k.col, k.row)) {
+          blind.push({ id: m.id, sheet: k.sheet, addr: FMLg.addr(k.col, k.row), label: k.label, sol: k.def.sol });
+        }
+      });
+
+      /* --- 方向二：逐格写死正确答案，应当全错 --- */
+      keys.forEach(function (k) {
+        if (solRefCount(k.def.sol, k.sheet) === 0) { exempt++; return; }
+        const key = k.sheet + '!' + FMLg.addr(k.col, k.row);
+        const r = solWb.tryGet(k.sheet, k.col, k.row);
+        if (!r.ok || typeof r.v !== 'number' || !isFinite(r.v)) return;
+        const saved = inputs[key];
+        inputs[key] = String(r.v);
+        g.reset();
+        const v = g.of(k.sheet, k.col, k.row);
+        if (v.ok) {
+          missed.push({
+            id: m.id, sheet: k.sheet, addr: FMLg.addr(k.col, k.row),
+            label: k.label, sol: k.def.sol, hardcoded: r.v
+          });
+        }
+        inputs[key] = saved;
+      });
+      g.reset();
+    });
+
+    return {
+      models: list.length, cells: cells,
+      误伤: harmed.length,          // 必须为 0
+      漏网: missed.length,          // 必须为 0
+      常数格豁免: exempt,           // 参考答案本身就是常数，填常数合法
+      原理盲区: blind.length,       // 答案与数据无关，只受结构检查保护，见 Grade.invariant
+      harmed: harmed, missed: missed, blind: blind
+    };
+  };
 })(window);

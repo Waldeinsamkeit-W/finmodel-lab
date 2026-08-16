@@ -96,18 +96,15 @@
 
   function cellFmt(sheet, row, cell) { return (cell && cell.fmt) || row.fmt || undefined; }
 
-  function nearEnough(a, b) {
-    if (typeof a !== 'number' || typeof b !== 'number') return false;
-    if (!isFinite(a) || !isFinite(b)) return false;
-    return Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 0.002);
-  }
+  /* 判定统一走 grade.js，容差也在那里定义，避免三处各写一份又互相飘。 */
+  const nearEnough = Grade.near;
 
   /* =========================================================================
    * 应用状态
    * =======================================================================*/
   const S = {
     filterMarket: 'all', filterLevel: 'all', filterIndustry: 'all',
-    model: null, sheetIdx: 0, actInfo: null, inputs: {}, wb: null, sol: null,
+    model: null, sheetIdx: 0, actInfo: null, inputs: {}, wb: null, sol: null, grader: null,
     showChecks: false, hintFor: null, startTs: 0
   };
 
@@ -1133,6 +1130,7 @@
     const m = S.model;
     S.wb = new FML.Workbook(m, makeGetter(m, S.inputs, false));
     S.sol = new FML.Workbook(m, makeGetter(m, {}, true));
+    S.grader = Grade.build(m, S.inputs);
   }
 
   function renderTabs() {
@@ -1172,6 +1170,7 @@
       revealed: Store.model(S.model.id).revealed || {},
       getWb: function () { return S.wb; },
       getSol: function () { return S.sol; },
+      getGrader: function () { return S.grader; },
       showChecks: function () { return S.showChecks; },
       fmtVal: fmtVal,
       onChange: function (sheetName, col, row, val) { setInput(sheetName, col, row, val); },
@@ -1231,6 +1230,7 @@
     if ((S.inputs[key] || '') === v) return;
     if (v === '') delete S.inputs[key]; else S.inputs[key] = v;
     Store.setInput(S.model.id, key, v, { sheet: S.sheetIdx });
+    S.wb.reset(); S.sol.reset(); S.grader.reset();
     updateProgress();
     flashSaved();
   }
@@ -1248,25 +1248,9 @@
   }
 
   function scoreAll() {
-    const m = S.model;
-    S.wb.reset(); S.sol.reset();
-    let correct = 0, total = 0;
-    m.sheets.forEach(function (sh) {
-      sh.rows.forEach(function (r, ri) {
-        const rowNum = ri + 2;
-        (r.cells || []).forEach(function (cell, ci) {
-          if (!cell || cell.kind !== 'input') return;
-          total++;
-          const col = ci + 1;
-          const key = sh.name + '!' + FML.addr(col, rowNum);
-          if (!S.inputs[key]) return;
-          const a = S.wb.tryGet(sh.name, col, rowNum);
-          const b = S.sol.tryGet(sh.name, col, rowNum);
-          if (a.ok && b.ok && nearEnough(a.v, b.v)) correct++;
-        });
-      });
-    });
-    return { correct: correct, total: total };
+    /* 判定结果在 grader 里按格缓存，只有 setInput 会让它失效。
+       renderSide 每次选格都会调到这里，不能每次都重算全表。 */
+    return S.grader.scan();
   }
 
   function updateProgress() {
@@ -1317,14 +1301,19 @@
       const key = sh.name + '!' + di.addr;
       const raw = S.inputs[key] || '';
       if (raw) {
-        S.wb.reset(); S.sol.reset();
-        const ur = S.wb.tryGet(sh.name, di.col, di.row);
+        const vd = S.grader.of(sh.name, di.col, di.row);
         const sr = S.sol.tryGet(sh.name, di.col, di.row);
-        if (sr.ok && !(ur.ok && nearEnough(ur.v, sr.v))) {
+        if (sr.ok && !vd.ok) {
+          const ur = S.wb.tryGet(sh.name, di.col, di.row);
+          /* 格式写在行上、单元格可以覆盖，和表格渲染取的是同一条规则 */
+          const dfmt = cellFmt(sh, sh.rows[di.row - 2] || {}, di.def);
           const list = Diag.analyze({
             sheetName: sh.name, label: di.label,
             userRaw: raw, userVal: ur.ok ? ur.v : null, userErr: ur.ok ? null : ur.err,
             solRaw: di.def.sol, solVal: sr.v,
+            verdict: vd.code, refVal: vd.refVal, yourVal: vd.yourVal,
+            bounds: di.def.bounds, boundsNote: di.def.boundsNote,
+            fmtVal: function (v) { return fmtVal(v, dfmt); },
             evalIn: function (f) {
               try {
                 return FML.evaluate(FML.compile(String(f).replace(/^=/, '')),
@@ -1332,10 +1321,14 @@
               } catch (e) { return null; }
             }
           });
+          /* 值本身是对的（写死 / 公式不等价）时，别把它显示成红色的「你的结果」，
+             那会让学生以为数算错了，而错的其实是得到这个数的方式。 */
+          const valueRight = (vd.code === 'const' || vd.code === 'nonequiv');
           diagHTML = '<div class="side-sec"><div class="st">诊断 · ' + esc(di.addr) + '</div>' +
             '<div class="diag-box">' +
-              '<div class="diag-cmp"><span>你的结果</span><b class="bad">' + esc(fmtVal(ur.ok ? ur.v : '#ERR', di.def.fmt)) + '</b>' +
-              '<span>参考答案</span><b class="ok">' + esc(fmtVal(sr.v, di.def.fmt)) + '</b></div>' +
+              '<div class="diag-cmp"><span>你的结果</span><b class="' + (valueRight ? 'ok' : 'bad') + '">' +
+                esc(fmtVal(ur.ok ? ur.v : '#ERR', dfmt)) + '</b>' +
+              '<span>参考答案</span><b class="ok">' + esc(fmtVal(sr.v, dfmt)) + '</b></div>' +
               list.map(function (x, i) {
                 return '<div class="diag-item"' + (i === 0 ? ' data-top="1"' : '') + '>' +
                   '<b>' + esc(x.t) + '</b><span>' + esc(x.d) + '</span></div>';
@@ -1394,8 +1387,38 @@
       '<div class="side-sec"><div class="st">做完之后应该看懂什么</div>' +
         m.takeaways.map((t) => '<div class="callout info" style="font-size:12.5px">' + esc(t) + '</div>').join('') +
       '</div>' +
-      '<div class="side-sec"><div class="st">数据说明</div><div class="footnote">' + esc(m.dataNote) + '</div></div>' +
+      '<div class="side-sec"><div class="st">数据说明</div>' +
+        provHTML(m) +
+        '<div class="footnote">' + esc(m.dataNote) + '</div></div>' +
       (m.companyId ? '<div class="side-sec"><a class="btn" style="width:100%;justify-content:center" href="#/company/' + m.companyId + '">查看公司案例背景与财报分析 →</a></div>' : '');
+  }
+
+  /* 数据口径条。币种、量级、财年口径全部从 sheet.unit 和表头推出来，
+     不是手写的，所以不会写着写着和数据对不上。
+     只有人能填的部分（原文链接、页码、截止日）如实标「未标注」，不编。 */
+  function provHTML(m) {
+    if (!window.Prov) return '';
+    const line = Prov.summary(m);
+    const src = m.source || {};
+    let html = '';
+    if (line) html += '<div class="prov-line">' + esc(line) + '</div>';
+    if (src.docs && src.docs.length) {
+      html += '<div class="prov-docs">' + src.docs.map(function (d) {
+        const bits = [d.title, d.period, d.statement, d.page ? '第 ' + d.page + ' 页' : null]
+          .filter(Boolean).map(esc).join(' · ');
+        return d.url
+          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a></div>'
+          : '<div>' + bits + '</div>';
+      }).join('') + '</div>';
+    }
+    /* 缺口只在「已经声明了 source 但填了一半」时提示。
+       一个 source 都没声明的模型不在这里唠叨——56 个模型页页挂一行警告是噪声，
+       那份清单属于开发期的 verifySource()，是拿来干活的，不是拿来给学生看的。 */
+    if (m.source) {
+      const gaps = Prov.gaps(m);
+      if (gaps.length) html += '<div class="prov-gap">溯源信息未标注：' + esc(gaps.join('、')) + '</div>';
+    }
+    return html;
   }
 
   /* =========================================================================

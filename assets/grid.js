@@ -13,6 +13,7 @@
   'use strict';
 
   const FML = global.FML;
+  const Grade = global.Grade;
 
   const Grid = {};
   let ctx = null;         // 宿主提供的上下文
@@ -180,8 +181,8 @@
   /* ============================================================== 求值显示 */
   Grid.refresh = function () {
     const sh = sheet();
-    const wb = ctx.getWb(), sol = ctx.getSol();
-    wb.reset(); sol.reset();
+    const wb = ctx.getWb();
+    wb.reset();
     const revealed = ctx.revealed || {};
 
     sh.rows.forEach(function (r, ri) {
@@ -194,7 +195,7 @@
         if (!td) continue;
         const disp = td.querySelector('.disp');
         const mark = td.querySelector('.mark');
-        td.classList.remove('err', 'ok', 'bad');
+        td.classList.remove('err', 'ok', 'bad', 'warn');
         if (mark) mark.textContent = '';
         const fmt = cd.fmt || r.fmt;
 
@@ -208,9 +209,13 @@
           disp.textContent = ctx.fmtVal(res.v, fmt);
           td.title = raw;
           if (ctx.showChecks()) {
-            const sr = sol.tryGet(sh.name, c, rowNum);
-            if (sr.ok && near(res.v, sr.v)) { td.classList.add('ok'); if (mark) mark.textContent = '✓'; }
-            else { td.classList.add('bad'); if (mark) mark.textContent = '✕'; }
+            const vd = ctx.getGrader().of(sh.name, c, rowNum);
+            if (vd.ok) { td.classList.add('ok'); if (mark) mark.textContent = '✓'; }
+            else if (vd.code === 'const' || vd.code === 'nonequiv') {
+              /* 数对了，但不是算出来的。跟「算错了」区分开——两者要改的东西完全不同。 */
+              td.classList.add('warn'); if (mark) mark.textContent = '!';
+              td.title = raw + '\n\n' + Grade.label(vd.code);
+            } else { td.classList.add('bad'); if (mark) mark.textContent = '✕'; }
           } else if (revealed[sh.name + '!' + a] && mark) { mark.textContent = '·'; }
         } else {
           const res = wb.tryGet(sh.name, c, rowNum);
@@ -221,12 +226,6 @@
     });
     paintSel();
   };
-
-  function near(a, b) {
-    if (typeof a !== 'number' || typeof b !== 'number') return false;
-    if (!isFinite(a) || !isFinite(b)) return false;
-    return Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 0.002);
-  }
 
   /* ============================================================== 选区 */
   function setSel(c1, r1, c2, r2, keepActive) {

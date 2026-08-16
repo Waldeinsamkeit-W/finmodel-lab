@@ -518,11 +518,27 @@
    *
    * 注意：分节标题行、空行里的空格仍然返回 0——那是合法的，
    * SUM(B3:B10) 跨过一个小标题行是正常写法。
+   *
+   * opts（等价性判定用，见 grade.js）：
+   *   perturb(sheetName, col, row, v) -> v'
+   *     只作用在 given 格上。把真实数据换成一组「平行世界」的数据，
+   *     用来看某一格到底是从上游算出来的，还是写死的常数。
+   *   userOnly: 'sheet!ADDR'
+   *     只有这一格取用户输入，其余 input 格一律取参考公式。
+   *     作用是把每一格隔离开判定：上游填错不该连累下游那格的对错。
+   *   override: { 'sheet!ADDR': 数值 }
+   *     把指定格子直接钉成某个值，覆盖它原本的公式。
+   *     用来单独戳一格看下游反应，perturb 做不到这件事——
+   *     恒等式（资产=负债+权益）对所有 given 的等比扰动都免疫。
    * ------------------------------------------------------------------------*/
-  function makeGetter(model, inputs, useSolution) {
+  function makeGetter(model, inputs, useSolution, opts) {
     const map = {}, names = [];
     (model.sheets || []).forEach(function (s) { map[s.name] = s; names.push(s.name); });
     inputs = inputs || {};
+    opts = opts || {};
+    const perturb = opts.perturb || null;
+    const userOnly = opts.userOnly || null;
+    const override = opts.override || null;
 
     return function (sheetName, col, row) {
       const sh = map[sheetName];
@@ -546,12 +562,20 @@
       if (col === 0) return { kind: 'text', raw: r.label || '' };
       const c = (r.cells || [])[col - 1];
       if (!c) return { kind: 'number', raw: 0 };        // 分节行/空行里的空格，合法
-      if (c.kind === 'given') return { kind: 'number', raw: c.v };
+      if (override) {
+        const ok = sheetName + '!' + addr(col, row);
+        if (ok in override) return { kind: 'number', raw: override[ok] };
+      }
+      if (c.kind === 'given') {
+        return { kind: 'number', raw: perturb ? perturb(sheetName, col, row, c.v) : c.v };
+      }
       if (c.kind === 'calc') return { kind: 'formula', raw: c.f };
       if (c.kind === 'text') return { kind: 'text', raw: c.t };
       if (c.kind === 'input') {
-        if (useSolution) return { kind: 'formula', raw: c.sol };
-        return { kind: 'formula', raw: inputs[sheetName + '!' + addr(col, row)] || '' };
+        const key = sheetName + '!' + addr(col, row);
+        const useUser = userOnly ? (key === userOnly) : !useSolution;
+        if (!useUser) return { kind: 'formula', raw: c.sol };
+        return { kind: 'formula', raw: inputs[key] || '' };
       }
       return { kind: 'number', raw: 0 };
     };
