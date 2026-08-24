@@ -63,6 +63,7 @@
       steps: [
         { id: 'qoe-ebitda', note: '谈倍数之前先把分母调准。尽调里的 QoE：剔一次性、还原关联交易，正常化 EBITDA 才是能拿去乘倍数的那个数。' },
         { id: 'aapl-multiples', note: '倍数的计算与口径匹配。分子分母不匹配是最常见也最难自查的错误。' },
+        { id: 'comps-choose', note: '⭐ 先决定用哪个倍数，再算。四家画像完全不同的公司，四个倍数全算一遍，你会看到大半的格子算出来是没有意义的——估值方法选错，后面算得再精确都没用。' },
         { id: 'yili-vs-moutai', note: '横向对比的标准动作：CAGR、指数化、以及 PEG 在什么时候会失效。' },
         { id: 'comps-caliber', note: '可比公司的正确顺序：先调平口径，再算比率，最后才谈倍数。四家 A 股龙头，两个真实的口径陷阱。' },
         { id: 'comps-precedent', note: '⭐ 四笔真实交易的成交倍数。可比公司看二级市场，先例交易看真金白银买下整个公司付了多少——差额就是控制权溢价。' },
@@ -108,6 +109,8 @@
     }
   ];
 
+  DB.pathFull = DB.path;
+
   /* 不在主线上的专题：口径体系与主线差异太大，按需单学。
      这四条支线各自内部是有顺序的（简单 → 中级 → 复杂），但支线之间互不依赖。 */
   DB.pathExtras = [
@@ -127,6 +130,221 @@
     { id: 'cr-covenant', note: '信用支线第 2 步。契约的价值在于提前把控制权交给债权人，所以关键是 headroom 还剩多少。再看协议口径 Adjusted EBITDA 能把 headroom 放宽到什么程度。' },
     { id: 'cr-recovery', note: '信用支线第 3 步。违约之后能拿回多少：清偿瀑布、各层回收率、预期损失。回收率是债项属性不是发行人属性——这是全站唯一一个把"同一家公司不同债券差好几档评级"讲清楚的模型。' }
   ];
+
+  /* ==================================================================
+   * 学习轨道 —— 同样 69 个模型，三类人该走的路完全不同
+   *
+   * 三类学员的差别主要在「入口和深度」，不是内容集合：
+   *   零基础     缺的是会计前置，且不该一上来就碰复杂档
+   *   有财务基础 会读报表但没建过模型，重心在预测与估值
+   *   从业者     基础不用重学，重心在交易执行与行业专线
+   *
+   * 所以这里不新增内容，只做策展：每条轨道挑出该走的步骤，
+   * 并按这条轨道的视角重写「为什么这一步对你重要」。
+   *
+   * 步骤写法：'模型id' 表示沿用完整主线里的说明；
+   * { id, note } 表示这条轨道要换一句更贴切的说明。
+   * ================================================================== */
+
+  /* 完整主线里每一步的原始说明，供各轨道复用 */
+  const NOTE = {};
+  DB.pathFull.forEach(function (st) {
+    st.steps.forEach(function (x) { NOTE[x.id] = x.note; });
+  });
+  DB.pathExtras.forEach(function (x) { NOTE[x.id] = x.note; });
+
+  function steps(list) {
+    return list.map(function (x) {
+      if (typeof x === 'string') return { id: x, note: NOTE[x] || '' };
+      return { id: x.id, note: x.note || NOTE[x.id] || '' };
+    });
+  }
+
+  DB.tracks = [
+    {
+      id: 'zero',
+      name: '零基础',
+      who: '非财会背景转行，或只学过会计原理、没完整读过一份财报',
+      goal: '能独立读懂一张财报，并算出人生第一个估值。',
+      note: '这条轨道刻意不碰复杂档，也不碰预测和交易。目标是把地基打牢——' +
+            '前三步是会计前置，站里其他轨道默认你已经会了。',
+      stages: [
+        {
+          id: 'z1', name: '先把会计的地基补上',
+          goal: '理解会计恒等式、三张表怎么连起来、以及为什么利润不等于现金。',
+          why: '这三件事是所有财务模型的前提。跳过它们直接做报表分析，' +
+               '你会一直有种"每一步都算得出来、但不知道为什么这么算"的感觉。',
+          steps: steps(['basic-equation', 'basic-three-link', 'basic-accrual'])
+        },
+        {
+          id: 'z2', name: '把三张报表读明白',
+          goal: '能自己把一张报表加总出来，说清每个小计的含义。',
+          why: '有了地基，现在换成真实公司的报表。这一阶段仍然不预测、不估值，' +
+               '只练一件事：让报表从"一堆数字"变成"一套有勾稽关系的结构"。',
+          steps: steps([
+            { id: 'aapl-income', note: '第一份真实财报。前面学的"收入减成本"在这里变成了五层台阶，每一层都有名字。' },
+            { id: 'aapl-cf-derive', note: '把 basic-accrual 里那张调节表，换成真实公司再做一遍。营运资本的符号是最高频的错误来源。' },
+            'moutai-mix',
+            'tsla-unit'
+          ])
+        },
+        {
+          id: 'z3', name: '学会解释变化',
+          goal: '看到一个指标变了，能拆出它是被哪几个因素推动的。',
+          why: '读懂报表之后的下一层能力。这里只做两个最通用的工具，' +
+               '够用了——更多的归因方法等你真的需要时再学不迟。',
+          steps: steps(['aapl-dupont', 'catl-bridge'])
+        },
+        {
+          id: 'z4', name: '算出第一个估值',
+          goal: '掌握倍数估值的计算与选择，并走通一遍最简版 DCF。',
+          why: '估值不是这条轨道的重点，但走通一遍你才知道前面那些报表功夫是为了什么。' +
+               '先学倍数（快、直观），再看一眼 DCF 的骨架。',
+          steps: steps([
+            'aapl-multiples',
+            { id: 'comps-choose', note: '⭐ 这一步比会算倍数更重要：四家公司算下来你会发现，大部分倍数在大部分情况下是没有意义的。' },
+            { id: 'aapl-dcf-quick', note: '现金流和折现率都给你，只练折现这套算术。走完会看到终值占了企业价值的 77%——这个印象先留着。' }
+          ])
+        }
+      ]
+    },
+    {
+      id: 'finance',
+      name: '有财务基础',
+      who: '会计、审计、财务岗，能读懂报表，但没有系统建过模型',
+      goal: '从"会读报表"过渡到"会搭模型、会估值"。',
+      note: '跳过会计前置，也跳过最基础的报表加总。重心在两件你现在还不会的事：' +
+            '从驱动假设推出三张预测报表，以及把预测变成一个估值。',
+      stages: [
+        {
+          id: 'f1', name: '口径与归因',
+          goal: '能把不同公司的口径调平，并把一个指标的变化精确拆开。',
+          why: '你已经会读报表，但审计视角关心"数字对不对"，投资视角关心"变化从哪来"。' +
+               '这一阶段换的是这个视角。',
+          steps: steps(['moutai-mix', 'hengrui-rd', 'aapl-dupont', 'catl-bridge', 'nvda-oplev', 'popmart-mix', 'inovance-attrib'])
+        },
+        {
+          id: 'f2', name: '预测与三表联动',
+          goal: '能从驱动假设推出完整三张预测报表，并让资产负债表精确配平。',
+          why: '这是你和专业建模之间最主要的那道门槛，也是这条轨道的核心。' +
+               '带 ⭐ 的两个都很重，各留出完整的两小时。',
+          steps: steps(['tcent-seg', 'byd-driver', 'inovance-fc', 'moutai-3s', 'aapl-full-3s'])
+        },
+        {
+          id: 'f3', name: '相对估值',
+          goal: '掌握倍数的选择、口径调平与可比公司的完整流程。',
+          why: '先相对后绝对。倍数法快但粗，它的价值之一是给后面的 DCF 结果做合理性体检。',
+          steps: steps([
+            'aapl-multiples',
+            { id: 'comps-choose', note: '⭐ 审计出身最容易犯的错是"算得很准但选错了指标"。这一步专治这个。' },
+            'yili-vs-moutai', 'comps-caliber'
+          ])
+        },
+        {
+          id: 'f4', name: '绝对估值',
+          goal: '能把每一个 DCF 输入项追溯回报表的具体行，并做敏感性分析。',
+          why: 'DCF 慢，但它的每个假设都可追溯、可辩论。做完你会理解为什么' +
+               '终值占比这么高，以及为什么敏感性分析不是可选项。',
+          steps: steps(['aapl-dcf-quick', 'moutai-dcf', 'aapl-full-dcf', 'aapl-dcf'])
+        },
+        {
+          id: 'f5', name: '分部估值与盈利质量',
+          goal: '会把业务拆开分别估值，并在用倍数之前先把分母调准。',
+          why: '这两件事是投资岗和财务岗差别最大的地方：财务岗按准则记账，' +
+               '投资岗要判断"这个利润能不能持续、这块业务该单独值多少"。',
+          steps: steps(['qoe-ebitda', 'byd-sotp', 'inovance-sotp'])
+        }
+      ]
+    },
+    {
+      id: 'pro',
+      name: '相关从业者',
+      who: '投行、PE、投资或研究岗，已经能建模型，要补交易执行与行业专线',
+      goal: '打通交易执行的完整链条，并掌握四条口径完全不同的行业专线。',
+      note: '基础报表和预测部分整条跳过。这条轨道假设你已经会搭三表模型，' +
+            '重心放在两件事：一笔交易从定价到会计后果的全链条，以及主线口径管不到的行业。',
+      stages: [
+        {
+          id: 'p1', name: '估值方法体系（快速过一遍）',
+          goal: '把倍数的选择、调平与先例交易的用法系统化。',
+          why: '你大概率会算这些，但未必系统想过"什么时候哪个失效"。' +
+               '这一阶段是查漏补缺，做得快没关系。',
+          steps: steps([
+            { id: 'comps-choose', note: '⭐ 从这里开始。四家公司、四个倍数，把"什么时候哪个失效"一次性理清楚。' },
+            'comps-caliber', 'comps-precedent', 'qoe-ebitda'
+          ])
+        },
+        {
+          id: 'p2', name: '交易定价与对价设计',
+          goal: '能测算一笔交易对收购方的影响，并读懂对价条款如何分配风险。',
+          why: '估值谈完只是开始。价格桥、锁箱机制、协同定价、对赌条款——' +
+               '这些决定了同一个"估值"下双方实际拿到手的钱差多少。',
+          steps: steps(['ma-bridge', 'deal-lockbox', 'cssc-swap', 'msft-atvi', 'mindray-huitai', 'ma-synergy', 'earnout-vam', 'share-issue'])
+        },
+        {
+          id: 'p3', name: 'LBO 与回报归因',
+          goal: '搭出完整 LBO，并把回报拆成经营改善、倍数扩张、债务偿还三段。',
+          why: '杠杆收购是把"钱怎么赚到的"讲得最清楚的一类模型。' +
+               '三分解做完，你对任何一笔股权投资的回报来源都会更敏感。',
+          steps: steps(['belle-lbo-basic', 'belle-lbo-mid', 'belle-lbo-full'])
+        },
+        {
+          id: 'p4', name: '交易做完，账上变成什么样',
+          goal: '掌握购买价格分摊、商誉与减值，以及同一控制下合并的特殊处理。',
+          why: '这是并购独有的会计，通用财务建模课里学不到，' +
+               '却是读懂 A 股重组公告的前提。',
+          steps: steps(['ppa-goodwill', 'goodwill-impair', 'cssc-samectrl', 'cssc-merger'])
+        },
+        {
+          id: 'p5', name: '一级市场股权结构',
+          goal: '掌握 Cap Table、期权池与优先清算权对各方回报的实际影响。',
+          why: '条款设计的落点永远是"退出时谁分到多少"。' +
+               'Cap Table 上的持股比例和实际拿到的钱经常不是一回事。',
+          steps: steps(['vc-captable', 'vc-optionpool', 'vc-waterfall', 'spacex-pricing'])
+        },
+        {
+          id: 'p6', name: '行业专线（按需选）',
+          goal: '掌握四个主线口径完全管不到的行业各自的估值框架。',
+          why: '银行、保险、不动产、信用——这四类的口径体系和主线不通用，' +
+               '但只要你的覆盖范围沾到其中一个，就必须单独学。' +
+               '每条支线内部有顺序，支线之间互不依赖；完整的三档在下方「专题」里。',
+          steps: steps(['cmb-nim', 'ins-ev-nbv', 're-dscr', 'cr-covenant'])
+        }
+      ]
+    },
+    {
+      id: 'full',
+      name: '完整主线',
+      who: '想按能力顺序完整走一遍的人',
+      goal: '读表 → 归因 → 预测 → 估值 → 交易，一步不落。',
+      note: '这就是本站原本的那条主线，按能力递进排列，不按模型类型。' +
+            '时间充裕、或者不确定自己属于哪一档时，走这条。',
+      stages: DB.pathFull
+    }
+  ];
+
+  /* 切换轨道。DB.path 是所有消费方（路径页、导航计数、模型页的"下一步"）
+     共同读的那一份，所以只要换掉它并清掉索引缓存，全站自动跟随。 */
+  const TRACK_KEY = 'fml.track';
+
+  DB.setTrack = function (id) {
+    const t = DB.tracks.filter(function (x) { return x.id === id; })[0] || DB.tracks[DB.tracks.length - 1];
+    DB.currentTrack = t.id;
+    DB.path = t.stages;
+    DB._pathIdx = null;
+    try { localStorage.setItem(TRACK_KEY, t.id); } catch (e) { /* 隐私模式下忽略 */ }
+    return t;
+  };
+
+  DB.getTrack = function () {
+    return DB.tracks.filter(function (x) { return x.id === DB.currentTrack; })[0] || DB.tracks[DB.tracks.length - 1];
+  };
+
+  (function initTrack() {
+    let saved = null;
+    try { saved = localStorage.getItem(TRACK_KEY); } catch (e) { /* 同上 */ }
+    DB.setTrack(saved || 'full');
+  })();
 
   /* ------------------------------------------------------------------
    * 体量分级：把「概念难度」和「工作量」分开表达

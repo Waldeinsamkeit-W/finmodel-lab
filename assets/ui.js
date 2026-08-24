@@ -372,6 +372,15 @@
     Array.prototype.forEach.call($app.querySelectorAll('[data-goto]'), function (n) {
       n.onclick = function (e) { if (e.target.tagName === 'A') return; go(n.getAttribute('data-goto')); };
     });
+    /* 轨道切换：换掉 DB.path 再重渲染即可，进度是按模型 id 存的，不受影响 */
+    Array.prototype.forEach.call($app.querySelectorAll('[data-track]'), function (n) {
+      n.onclick = function () {
+        if (!DB.setTrack) return;
+        DB.setTrack(n.getAttribute('data-track'));
+        render();
+        window.scrollTo(0, 0);
+      };
+    });
   }
 
   function toggleTheme() {
@@ -609,12 +618,23 @@
         '<span class="cc-go">↗</span></div>';
     }).join('');
 
+    const tk = DB.getTrack ? DB.getTrack() : null;
+    const picker = !DB.tracks ? '' :
+      '<div class="trk-pick">' +
+        '<div class="trk-lab">选择适合你的路径</div>' +
+        '<div class="trk-btns">' + DB.tracks.map(function (x) {
+          return '<button class="trk' + (x.id === DB.currentTrack ? ' on' : '') + '" data-track="' + x.id + '">' +
+            '<b>' + esc(x.name) + '</b><span>' + esc(x.who) + '</span></button>';
+        }).join('') + '</div>' +
+        (tk ? '<div class="trk-note"><b>' + esc(tk.goal) + '</b>' + esc(tk.note) + '</div>' : '') +
+      '</div>';
+
     return '<div class="page-head">' +
-        '<div class="eyebrow">学习路径</div><h1>按顺序做完，就是一套完整的建模训练</h1>' +
-        '<div class="sub">路径按<b>能力</b>递进排列，不按模型类型——读表 → 归因 → 预测 → 估值 → 交易。' +
-        '每一步都写了它在练什么、为什么排在这个位置。没有基础的话，从阶段 1 第 1 步开始，' +
-        '不要跳着做：后面的训练会直接用到前面建立的直觉。</div>' +
-      '</div>' +
+        '<div class="eyebrow">学习路径</div><h1>' + esc(tk ? tk.name : '按顺序做完，就是一套完整的建模训练') + '</h1>' +
+        '<div class="sub">路径按<b>能力</b>递进排列，不按模型类型。每一步都写了它在练什么、' +
+        '为什么排在这个位置。<b>不要跳着做</b>：后面的训练会直接用到前面建立的直觉。' +
+        '换轨道不会丢进度——所有轨道共用同一份作答记录。</div>' +
+      '</div>' + picker +
       '<div class="stat-row">' +
         '<div class="stat"><div class="k">主线训练</div><div class="v">' + allIds.length + '</div></div>' +
         '<div class="stat"><div class="k">已完成</div><div class="v">' + overall.done + '<small> / ' + allIds.length + '</small></div></div>' +
