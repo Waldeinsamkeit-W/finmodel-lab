@@ -42,10 +42,18 @@
   function modelRec(id) {
     const st = load();
     if (!st.models[id]) {
-      st.models[id] = { inputs: {}, startedAt: nowTs(), updatedAt: nowTs(), lastCell: null, lastSheet: 0, correct: 0, total: 0, revealed: {}, snapshots: [], seconds: 0 };
+      st.models[id] = {
+        inputs: {}, startedAt: nowTs(), updatedAt: nowTs(), lastCell: null, lastSheet: 0,
+        correct: 0, total: 0, revealed: {}, hints: {}, attempts: {}, firstOk: {},
+        snapshots: [], seconds: 0
+      };
     }
     const r = st.models[id];
     if (!r.revealed) r.revealed = {};
+    /* 下面三项是后加的，老存档里没有——必须补齐，否则读取时会炸 */
+    if (!r.hints) r.hints = {};        // key -> 用过的最高提示层级 1|2|3
+    if (!r.attempts) r.attempts = {};  // key -> 提交过多少个不同的写法
+    if (!r.firstOk) r.firstOk = {};    // key -> 1/0，第一次提交是否就对了（只记一次）
     if (!r.snapshots) r.snapshots = [];
     if (!r.inputs) r.inputs = {};
     return r;
@@ -93,6 +101,43 @@
       const r = modelRec(modelId);
       r.revealed[key] = 1;
       scheduleSave();
+    },
+
+    /* ------------------------------------------------------------------
+     * 提示与尝试的记录
+     *
+     * 这三个函数是「独立掌握度」的全部数据来源。以前只有 revealed 一个标记，
+     * 而且它只在「填入参考公式」时才置位——学员从侧栏看到完整公式再自己敲一遍，
+     * 系统完全不知道，进度照样算 100%。那让完成度这个数字失去了意义。
+     * ---------------------------------------------------------------- */
+
+    /** 记录用过的提示层级，只升不降 */
+    markHint: function (modelId, key, tier) {
+      const r = modelRec(modelId);
+      const cur = r.hints[key] || 0;
+      if (tier > cur) { r.hints[key] = tier; r.updatedAt = nowTs(); scheduleSave(); }
+    },
+
+    /** 提交一次作答。返回这是第几次尝试。 */
+    bumpAttempt: function (modelId, key) {
+      const r = modelRec(modelId);
+      r.attempts[key] = (r.attempts[key] || 0) + 1;
+      scheduleSave();
+      return r.attempts[key];
+    },
+
+    /** 第一次判定结果，只记一次——之后再改再对都不算「首次正确」 */
+    markFirstResult: function (modelId, key, ok) {
+      const r = modelRec(modelId);
+      if (r.firstOk[key] === undefined) { r.firstOk[key] = ok ? 1 : 0; scheduleSave(); }
+    },
+
+    /** 这一格是不是「独立完成」：没看过答案，也没用过 2 级以上的提示 */
+    isSolo: function (modelId, key) {
+      const r = load().models[modelId];
+      if (!r) return true;
+      if (r.revealed && r.revealed[key]) return false;
+      return !(r.hints && r.hints[key] >= 2);
     },
 
     touch: function (modelId, sheetIdx) {

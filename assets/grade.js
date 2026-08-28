@@ -276,23 +276,32 @@
         wbS, refsOf(def.sol, sheetName), sheetName, col, row, tol);
     };
 
-    /* 全表统计。返回 {correct, total, filled} */
-    g.scan = function () {
-      let correct = 0, total = 0, filled = 0;
+    /* 全表统计。
+       correct 是「答对了几格」，solo 是「其中几格是没看提示自己做出来的」。
+       两个数分开，是因为它们回答的问题不同：前者是进度，后者才是掌握程度。
+       只有 correct 的话，一路看答案填完也是 100%，那个数字没有意义。 */
+    g.scan = function (solo) {
+      let correct = 0, total = 0, filled = 0, soloCorrect = 0, assisted = 0;
       (model.sheets || []).forEach(function (sh) {
         (sh.rows || []).forEach(function (r, ri) {
           const rowNum = ri + 2;
           (r.cells || []).forEach(function (cell, ci) {
             if (!cell || cell.kind !== 'input') return;
             total++;
+            const key = sh.name + '!' + FML.addr(ci + 1, rowNum);
             const v = g.of(sh.name, ci + 1, rowNum);
+            const isSolo = solo ? solo(key) : true;
+            if (!isSolo) assisted++;
             if (v.code === 'blank') return;
             filled++;
-            if (v.ok) correct++;
+            if (v.ok) { correct++; if (isSolo) soloCorrect++; }
           });
         });
       });
-      return { correct: correct, total: total, filled: filled };
+      return {
+        correct: correct, total: total, filled: filled,
+        soloCorrect: soloCorrect, assisted: assisted
+      };
     };
 
     return g;

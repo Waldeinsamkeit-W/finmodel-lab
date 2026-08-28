@@ -103,9 +103,9 @@
    * 应用状态
    * =======================================================================*/
   const S = {
-    filterMarket: 'all', filterLevel: 'all', filterIndustry: 'all',
+    filterMarket: 'all', filterLevel: 'all', filterIndustry: 'all', q: '',
     model: null, sheetIdx: 0, actInfo: null, inputs: {}, wb: null, sol: null, grader: null,
-    showChecks: false, hintFor: null, startTs: 0
+    showChecks: false, hintFor: null, hintTier: 0, tab: 'task', startTs: 0
   };
 
   /* =========================================================================
@@ -461,9 +461,27 @@
           return !(r && m && r.correct >= countInputs(m)); })[0] || ids[0];
         const fm = byId(DB.models, first);
         const mins = ids.reduce(function (a, id) { const m = byId(DB.models, id); return a + (m ? m.minutes : 0); }, 0);
+        /* 还没选过轨道，就先让人选，而不是直接推荐一门 41.9 小时的完整主线。
+           零基础轨道只有 6.1 小时——第一印象差别很大。 */
+        if (!DB.trackChosen) {
+          return '<div class="trk-pick-home">' +
+            '<div class="tph-h"><div class="pc-k">先选一条路线</div>' +
+            '<div class="pc-t">你现在是什么水平？</div>' +
+            '<div class="pc-d">69 个训练不必都做。选一条最贴近你的，剩下的随时能换。</div></div>' +
+            '<div class="tph-cards">' + DB.tracks.map(function (tk) {
+              const n = []; tk.stages.forEach(function (sg) { sg.steps.forEach(function (x) { n.push(x.id); }); });
+              const hh = n.reduce(function (a, id) { const mm = byId(DB.models, id); return a + (mm ? mm.minutes : 0); }, 0);
+              return '<button class="tph-card" data-track="' + tk.id + '">' +
+                '<b>' + esc(tk.name) + '</b>' +
+                '<span class="tph-who">' + esc(tk.who || '') + '</span>' +
+                '<span class="tph-n">' + n.length + ' 个训练 · 约 ' + (hh / 60).toFixed(1) + ' 小时</span>' +
+                '</button>';
+            }).join('') + '</div>' +
+          '</div>';
+        }
         return '<div class="path-cta">' +
           '<div class="pc-l">' +
-            '<div class="pc-k">推荐入口</div>' +
+            '<div class="pc-k">你的路线 · ' + esc((DB.getTrack() || {}).name || '') + '</div>' +
             '<div class="pc-t">按学习路径走一遍</div>' +
             '<div class="pc-d">' + ids.length + ' 个训练分 5 个阶段，按能力递进排列：读表 → 归因 → 预测 → 估值 → 交易。' +
             '每一步都写了它在练什么、为什么排在这个位置。总时长约 ' + Math.round(mins / 60) + ' 小时。</div>' +
@@ -762,6 +780,19 @@
     if (scope === 'secondary' || scope === 'primary') list = list.filter((m) => m.market === scope);
     if (S.filterLevel !== 'all') list = list.filter((m) => String(m.level) === S.filterLevel);
     if (S.filterIndustry !== 'all') list = list.filter((m) => m.industryId === S.filterIndustry);
+    /* 69 个模型之后，只靠难度 + 行业两个下拉已经找不到东西了。
+       搜索覆盖标题、副标题、标签、公司名、类型名，外加「30 分钟」这种时长写法。 */
+    if (S.q) {
+      const q = S.q.toLowerCase().trim();
+      const mins = /^(\d+)\s*分钟?(以内|以下)?$/.exec(q);
+      list = list.filter(function (m) {
+        if (mins) return m.minutes <= parseInt(mins[1], 10);
+        const co = m.companyId ? byId(DB.companies, m.companyId) : null;
+        const ty = byId(DB.modelTypes, m.type);
+        return [m.title, m.subtitle, (m.tags || []).join(' '), co && co.name, ty && ty.name, ty && ty.id, m.id]
+          .filter(Boolean).join(' ').toLowerCase().indexOf(q) >= 0;
+      });
+    }
     list.sort((a, b) => (a.level - b.level) || a.title.localeCompare(b.title, 'zh'));
 
     const title = scope === 'secondary' ? '二级市场模型' : scope === 'primary' ? '一级市场模型' : '全部模型';
@@ -775,6 +806,20 @@
       opts.map((o) => '<button data-v="' + o.v + '"' + (cur === o.v ? ' class="on"' : '') + '>' + o.t + '</button>').join('') + '</div>';
 
     setTimeout(function () {
+      const sb = document.getElementById('srch');
+      if (sb) {
+        /* 和筛选按钮走同一条重渲染路径，避免两套逻辑。
+           重渲染会销毁输入框，所以要把焦点和光标位置还回去。 */
+        sb.oninput = function () {
+          S.q = sb.value;
+          clearTimeout(sb._t);
+          sb._t = setTimeout(function () {
+            shell(viewBrowse(scope));
+            const nb = document.getElementById('srch');
+            if (nb) { nb.focus(); nb.setSelectionRange(nb.value.length, nb.value.length); }
+          }, 160);
+        };
+      }
       Array.prototype.forEach.call($app.querySelectorAll('[data-seg]'), function (segEl) {
         const key = segEl.getAttribute('data-seg');
         Array.prototype.forEach.call(segEl.querySelectorAll('button'), function (b) {
@@ -789,6 +834,7 @@
 
     return '<div class="page-head"><div class="eyebrow">模型库</div><h1>' + title + '</h1><div class="sub">' + desc + '</div></div>' +
       '<div class="toolbar">' +
+        '<input class="srch" id="srch" type="search" placeholder="搜索：LBO / 苹果 / 商誉 / 营运资本 / 30 分钟" value="' + esc(S.q || '') + '">' +
         seg('level', S.filterLevel, [{ v: 'all', t: '全部难度' }, { v: '1', t: '简单' }, { v: '2', t: '中级' }, { v: '3', t: '复杂' }]) +
         seg('ind', S.filterIndustry, [{ v: 'all', t: '全部行业' }].concat(DB.industries.map((i) => ({ v: i.id, t: i.name })))) +
         '<span style="margin-left:auto;font-size:12.5px;color:var(--ink-3)">共 ' + list.length + ' 个</span>' +
@@ -981,7 +1027,8 @@
       '<li><b>引用本表单元格</b>：<code>=B3-B6</code>、<code>=B11/B3</code></li>' +
       '<li><b>跨表引用</b>：<code>=\'假设\'!B3</code>、<code>=\'利润表\'!C8*\'假设\'!B14/365</code></li>' +
       '<li><b>区域求和</b>：<code>=SUM(B3:B6)</code></li>' +
-      '<li><b>绝对引用</b>：<code>=$B$25</code>（本平台不做拖拽填充，$ 只是习惯写法，效果与相对引用相同）</li>' +
+      '<li><b>绝对引用</b>：<code>=$B$25</code>。拖右下角填充柄、或按 <kbd>Ctrl</kbd>+<kbd>D</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> 填充时，' +
+      '相对引用会跟着平移，加了 <code>$</code> 的部分不动——和 Excel 一致</li>' +
       '<li><b>百分比</b>：可以直接写 <code>15%</code>，等价于 <code>0.15</code></li>' +
       '<li><b>幂运算</b>：<code>=B27^(1/B26)-1</code>（算年化回报常用）</li>' +
       '</ul>' +
@@ -1059,13 +1106,26 @@
           scaleChip(m) +
           '<div class="spacer"></div>' +
           '<div class="save-dot" id="saveDot"><i></i><span>已保存</span></div>' +
+          /* 主次分明：检查是唯一的主行动，提示次一级，其余收进 ··· 菜单。
+             「查看答案」刻意放在菜单最下面并做成危险色——它和「提示」不是同级操作，
+             并排摆会诱导人先点答案。 */
           '<button class="btn sm" id="btnSide">说明</button>' +
           '<button class="btn sm" id="btnHint">提示</button>' +
-          '<button class="btn sm" id="btnReveal">显示参考公式</button>' +
-          '<button class="btn sm" id="btnXlsx">导出 Excel</button>' +
-          '<button class="btn sm" id="btnReset">重置</button>' +
+          '<div class="more-wrap">' +
+            '<button class="btn sm" id="btnMore" aria-haspopup="true" aria-expanded="false">···</button>' +
+            '<div class="more-menu" id="moreMenu" hidden>' +
+              '<button id="btnXlsx">导出 Excel</button>' +
+              '<button id="btnReset">重置本模型</button>' +
+              '<div class="more-sep"></div>' +
+              '<button id="btnReveal" class="danger">查看答案</button>' +
+            '</div>' +
+          '</div>' +
           '<button class="btn primary sm" id="btnCheck">检查全部</button>' +
         '</div>' +
+        /* 手机端明确定位成学习/复习，而不是假装能在 390px 上建模。
+           公式栏、跨列比较、键盘导航在手机上都不成立，与其硬塞不如说清楚。 */
+        '<div class="mobile-note">手机适合看说明、步骤和错误诊断。' +
+          '真正动手填公式建议用电脑——需要键盘和横向视野。</div>' +
         '<div class="lab-body">' +
           '<div class="lab-side' + (isNarrow() ? ' collapsed' : '') + '" id="labSide"></div>' +
           '<div class="lab-main">' +
@@ -1112,7 +1172,15 @@
         .then(function () { btn.disabled = false; });
     };
     document.getElementById('btnHint').onclick = function () { showHint(); };
-    document.getElementById('btnReveal').onclick = function () { revealCurrent(); };
+    document.getElementById('btnReveal').onclick = function () { closeMore(); revealCurrent(); };
+    document.getElementById('btnMore').onclick = function (e) {
+      e.stopPropagation();
+      const mm = document.getElementById('moreMenu');
+      const open = mm.hasAttribute('hidden');
+      if (open) { mm.removeAttribute('hidden'); } else { mm.setAttribute('hidden', ''); }
+      this.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    document.addEventListener('click', closeMore);
     document.getElementById('btnSide').onclick = function () {
       document.getElementById('labSide').classList.toggle('collapsed');
     };
@@ -1251,6 +1319,13 @@
     if (v === '') delete S.inputs[key]; else S.inputs[key] = v;
     Store.setInput(S.model.id, key, v, { sheet: S.sheetIdx });
     S.wb.reset(); S.sol.reset(); S.grader.reset();
+    /* 记录尝试与首次结果。首次正确率是学习分析里信息量最大的单一指标，
+       而且只有在这里能拿到——判定完成之后再回头统计是补不出来的。
+       清空单元格不算一次尝试；填入参考公式（revealed）也不算。 */
+    if (v !== '' && !Store.model(S.model.id).revealed[key]) {
+      Store.bumpAttempt(S.model.id, key);
+      Store.markFirstResult(S.model.id, key, S.grader.of(sheetName, col, row).ok);
+    }
     updateProgress();
     flashSaved();
   }
@@ -1270,7 +1345,8 @@
   function scoreAll() {
     /* 判定结果在 grader 里按格缓存，只有 setInput 会让它失效。
        renderSide 每次选格都会调到这里，不能每次都重算全表。 */
-    return S.grader.scan();
+    const mid = S.model.id;
+    return S.grader.scan(function (key) { return Store.isSolo(mid, key); });
   }
 
   function updateProgress() {
@@ -1287,21 +1363,50 @@
     else toast('答对 ' + s.correct + ' / ' + s.total + '，点红色格子看诊断', s.correct ? '' : 'err');
   }
 
+  function closeMore() {
+    const mm = document.getElementById('moreMenu');
+    if (mm && !mm.hasAttribute('hidden')) {
+      mm.setAttribute('hidden', '');
+      const b = document.getElementById('btnMore');
+      if (b) b.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  /* 提示逐级放出，每一级都记录。换一个格子时层级归零。 */
   function showHint() {
     const info = S.actInfo;
     if (!info || info.kind !== 'input') { toast('先选中一个待填单元格'); return; }
-    S.hintFor = info.addr;
+    const sh = S.model.sheets[S.sheetIdx];
+    const key = sh.name + '!' + info.addr;
+    if (S.hintFor !== info.addr) { S.hintFor = info.addr; S.hintTier = 0; }
+    if (S.hintTier >= Hint.MAX) {
+      toast('提示已经给到最后一级了。还是没头绪的话，从「···」里查看答案', 'warn', 5000);
+      S.tab = 'fb'; renderSide(); return;
+    }
+    S.hintTier++;
+    Store.markHint(S.model.id, key, S.hintTier);
+    S.tab = 'fb';
     renderSide();
+    if (S.hintTier === Hint.MAX) toast('这是最后一级提示', 'warn');
   }
 
   function revealCurrent() {
     const info = S.actInfo;
     if (!info || info.kind !== 'input') { toast('先选中一个待填单元格'); return; }
     const key = info.sheet + '!' + info.addr;
+    /* 二次确认：看答案是有代价的，这一格从此不计入独立掌握度。
+       摩擦本身就是目的——不加确认，「查看答案」会变成默认动作。 */
+    if (!Store.model(S.model.id).revealed[key]) {
+      const tier = Store.model(S.model.id).hints[key] || 0;
+      const msg = '看过答案之后，这一格就不再计入「独立掌握度」（完成度不受影响）。' +
+        (tier < Hint.MAX ? '\n\n提示还有第 ' + (tier + 1) + ' 级没用，要不要先试试？' : '') +
+        '\n\n确定要看答案吗？';
+      if (!window.confirm(msg)) return;
+    }
     setInput(info.sheet, info.col, info.row, info.def.sol);
     Store.markRevealed(S.model.id, key);
     Grid.refresh(); syncFx(); renderSide();
-    toast('已填入参考公式');
+    toast('已填入参考公式，这一格不计入独立掌握度', 'warn', 5000);
   }
 
   /* ------------------------------------------------------------ 侧栏渲染 */
@@ -1358,16 +1463,48 @@
       }
     }
 
+    /* 当前单元格：三级提示，逐级放出。
+       以前这里直接显示完整参考公式，而且不做记录——等于一个不记账的答案按钮。 */
     let hintHTML = '';
     const info = S.actInfo;
     if (info && info.kind === 'input' && info.def) {
-      const showF = S.hintFor === info.addr;
+      const shx = m.sheets[S.sheetIdx];
+      const ckey = shx.name + '!' + info.addr;
+      const rec2 = Store.model(m.id);
+      const usedTier = (S.hintFor === info.addr) ? S.hintTier : 0;
+      const savedTier = rec2.hints[ckey] || 0;
+      const wasRevealed = !!rec2.revealed[ckey];
+      const tries = rec2.attempts[ckey] || 0;
+
+      let tiers = '';
+      for (let k = 1; k <= usedTier; k++) {
+        const h = Hint.of(m, shx, info.col, info.row, k);
+        if (!h) continue;
+        tiers += '<div class="hint-tier"><div class="ht-h"><span class="ht-n">' + k + '</span>' + esc(h.title) + '</div>' +
+          '<div class="ht-b">' + esc(h.body) + '</div>' +
+          (h.step ? '<div class="ht-step">' + esc(h.step) + '</div>' : '') +
+          (h.refs ? '<ul class="ht-refs">' + h.refs.map(function (r) {
+            return '<li>' + (r.cross ? '<span class="ht-x">跨表</span>' : '') + esc(r.label) + '</li>';
+          }).join('') + '</ul>' : '') +
+          (h.skeleton ? '<div class="formula-pill">' + esc(h.skeleton) + '</div>' : '') +
+          '</div>';
+      }
+
+      const meta = [];
+      if (tries) meta.push('已提交 ' + tries + ' 次');
+      if (savedTier) meta.push('用过 ' + savedTier + ' 级提示');
+      if (wasRevealed) meta.push('看过答案');
+
       hintHTML = '<div class="side-sec"><div class="st">当前单元格</div><div class="hint-box">' +
         '<div class="hb-addr">' + esc(info.sheet) + '!' + esc(info.addr) + '</div>' +
         '<div style="margin-top:4px"><b>' + esc(info.label) + '</b> · ' + esc(info.header) + '</div>' +
-        (showF ? '<div style="margin-top:8px">参考公式：</div><div class="formula-pill">' + esc(info.def.sol) + '</div>'
-               : '<div style="margin-top:8px;color:var(--ink-3);font-size:12.5px">点上方「提示」查看参考公式，或自己先试试。' +
-                 '写公式时用鼠标点其他格可以直接插入引用；拖右下角小方块可以整行整列填充。</div>') +
+        (meta.length ? '<div class="hb-meta">' + esc(meta.join(' · ')) + '</div>' : '') +
+        tiers +
+        (usedTier < Hint.MAX
+          ? '<div class="hb-more">点上方「提示」' + (usedTier ? '看第 ' + (usedTier + 1) + ' 级' : '获取第 1 级提示') +
+            '（共 ' + Hint.MAX + ' 级，用到 2 级以上就不算独立完成）</div>'
+          : '<div class="hb-more">提示已用尽。仍没头绪就从「···」查看答案。</div>') +
+        (wasRevealed ? '<div style="margin-top:8px">参考公式：</div><div class="formula-pill">' + esc(info.def.sol) + '</div>' : '') +
         '</div></div>';
     }
 
@@ -1388,19 +1525,45 @@
         '</div>';
     }
 
-    side.innerHTML =
-      '<div class="side-sec">' +
-        '<div class="progress-line"><span>进度</span><div class="bar' + (pct >= 100 ? ' done' : '') + '"><i style="width:' + pct + '%"></i></div><span class="num">' + s.correct + '/' + s.total + '</span></div>' +
-        '<div class="footnote" style="margin-top:6px">最后修改：' + fullTime(rec.updatedAt) + '</div>' +
+    /* 完成度和独立掌握度分开显示。
+       只有 correct/total 的话，一路看答案填完也是 100%——那个数字没有信息量。 */
+    const soloPct = s.total ? Math.round(s.soloCorrect / s.total * 100) : 0;
+    const rec3 = Store.model(m.id);
+    const nHint = Object.keys(rec3.hints || {}).length;
+    const nSeen = Object.keys(rec3.revealed || {}).length;
+    const firstVals = Object.keys(rec3.firstOk || {});
+    const firstOkN = firstVals.filter(function (k) { return rec3.firstOk[k]; }).length;
+
+    const progHTML = '<div class="side-sec">' +
+      '<div class="progress-line"><span>完成度</span><div class="bar' + (pct >= 100 ? ' done' : '') + '"><i style="width:' + pct + '%"></i></div><span class="num">' + s.correct + '/' + s.total + '</span></div>' +
+      '<div class="progress-line" style="margin-top:6px"><span>独立掌握</span><div class="bar solo"><i style="width:' + soloPct + '%"></i></div><span class="num">' + soloPct + '%</span></div>' +
+      '<div class="footnote" style="margin-top:7px">' +
+        (firstVals.length ? '首次正确 ' + firstOkN + '/' + firstVals.length + ' 格' : '还没有作答记录') +
+        (nHint ? ' · ' + nHint + ' 格用过提示' : '') +
+        (nSeen ? ' · ' + nSeen + ' 格看过答案' : '') +
       '</div>' +
-      diagHTML +
-      pathHTML +
-      hintHTML +
+      '<div class="footnote" style="margin-top:4px">最后修改：' + fullTime(rec.updatedAt) + '</div>' +
+    '</div>';
+
+    /* 三个 Tab：做题时不该被九个板块同时轰炸。
+       任务 = 我现在该干什么；反馈 = 这一格怎么了；资料 = 背景知识，需要时再看。 */
+    const TABS = [{ id: 'task', n: '任务' }, { id: 'fb', n: '提示与诊断' }, { id: 'doc', n: '案例资料' }];
+    const tabBar = '<div class="side-tabs">' + TABS.map(function (x) {
+      return '<button class="' + (S.tab === x.id ? 'on' : '') + '" data-tab="' + x.id + '">' + x.n +
+        (x.id === 'fb' && diagHTML ? '<i class="dot"></i>' : '') + '</button>';
+    }).join('') + '</div>';
+
+    const paneTask = progHTML + pathHTML +
+      '<div class="side-sec"><div class="st">操作步骤</div>' +
+        m.steps.map((x, i) => '<div class="step"><div class="n">' + (i + 1) + '</div><div><b>' + esc(x.t) + '</b><br>' + esc(x.d) + '</div></div>').join('') +
+      '</div>';
+
+    const paneFb = hintHTML + diagHTML +
+      (diagHTML || hintHTML ? '' : '<div class="side-sec"><div class="footnote">选中一个待填单元格，这里会显示提示；点「检查全部」之后，答错的格子会显示诊断。</div></div>');
+
+    const paneDoc =
       '<div class="side-sec"><div class="st">这个模型在干什么</div>' +
         m.intro.split('\n\n').map((p) => '<p style="font-size:13px;color:var(--ink-2)">' + esc(p).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>') + '</p>').join('') +
-      '</div>' +
-      '<div class="side-sec"><div class="st">操作步骤</div>' +
-        m.steps.map((st, i) => '<div class="step"><div class="n">' + (i + 1) + '</div><div><b>' + esc(st.t) + '</b><br>' + esc(st.d) + '</div></div>').join('') +
       '</div>' +
       '<div class="side-sec"><div class="st">学习目标</div><ul style="padding-left:18px;margin:0;font-size:13px;color:var(--ink-2)">' +
         m.objectives.map((o) => '<li style="margin-bottom:5px">' + esc(o) + '</li>').join('') + '</ul></div>' +
@@ -1411,6 +1574,13 @@
         provHTML(m) +
         '<div class="footnote">' + esc(m.dataNote) + '</div></div>' +
       (m.companyId ? '<div class="side-sec"><a class="btn" style="width:100%;justify-content:center" href="#/company/' + m.companyId + '">查看公司案例背景与财报分析 →</a></div>' : '');
+
+    side.innerHTML = tabBar + '<div class="side-pane">' +
+      (S.tab === 'fb' ? paneFb : S.tab === 'doc' ? paneDoc : paneTask) + '</div>';
+
+    Array.prototype.forEach.call(side.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { S.tab = b.getAttribute('data-tab'); renderSide(); };
+    });
   }
 
   /* 数据口径条。币种、量级、财年口径全部从 sheet.unit 和表头推出来，

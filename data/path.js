@@ -327,12 +327,18 @@
      共同读的那一份，所以只要换掉它并清掉索引缓存，全站自动跟随。 */
   const TRACK_KEY = 'fml.track';
 
-  DB.setTrack = function (id) {
+  /** @param provisional 只是为了让路径页有东西可渲染，不算用户做过选择 */
+  DB.setTrack = function (id, provisional) {
     const t = DB.tracks.filter(function (x) { return x.id === id; })[0] || DB.tracks[DB.tracks.length - 1];
+    DB.trackChosen = !provisional;
     DB.currentTrack = t.id;
     DB.path = t.stages;
     DB._pathIdx = null;
-    try { localStorage.setItem(TRACK_KEY, t.id); } catch (e) { /* 隐私模式下忽略 */ }
+    /* provisional 只是为了让路径页有默认内容可渲染，不能落盘——
+       落了盘下次进来就会被当成「用户已经选过」，首页的轨道选择再也不出现。 */
+    if (!provisional) {
+      try { localStorage.setItem(TRACK_KEY, t.id); } catch (e) { /* 隐私模式下忽略 */ }
+    }
     return t;
   };
 
@@ -343,7 +349,10 @@
   (function initTrack() {
     let saved = null;
     try { saved = localStorage.getItem(TRACK_KEY); } catch (e) { /* 同上 */ }
-    DB.setTrack(saved || 'full');
+    /* 没选过轨道就不预设。以前默认 full，等于对第一次打开的人推荐一门
+       41.9 小时 / 54 步的课——心理门槛太高，而零基础轨道只有 6.1 小时。
+       未选择时首页会先让人选，选完记住。 */
+    if (saved) DB.setTrack(saved); else DB.setTrack('full', true);
   })();
 
   /* ------------------------------------------------------------------

@@ -723,11 +723,106 @@ kbd {
 }
 .trk:hover { border-color: var(--border-strong); }
 .trk.on { border-color: var(--accent); background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--accent); }
-.trk b { font-size: 13.5px; color: var(--ink-1); }
+.trk b { font-size: 13.5px; color: var(--ink); }
 .trk span { font-size: 11.5px; color: var(--ink-3); line-height: 1.45; }
 .trk-note {
   margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--accent);
   background: var(--surface-2); border-radius: 0 6px 6px 0; font-size: 12.5px;
   color: var(--ink-2); line-height: 1.65;
 }
-.trk-note b { display: block; color: var(--ink-1); margin-bottom: 3px; }
+.trk-note b { display: block; color: var(--ink); margin-bottom: 3px; }
+
+/* ------------------------------------------------------ 侧栏三 Tab */
+.side-tabs {
+  display: flex; gap: 2px; margin: -4px -4px 14px; padding: 3px;
+  background: var(--surface-3); border-radius: 9px; position: sticky; top: -18px; z-index: 3;
+}
+.side-tabs button {
+  flex: 1; border: none; background: none; padding: 6px 8px; border-radius: 7px;
+  font-size: 12.5px; color: var(--ink-2); font-weight: 500; position: relative;
+}
+.side-tabs button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); font-weight: 640; }
+.side-tabs button .dot {
+  display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--err); margin-left: 5px; vertical-align: 2px;
+}
+.side-pane { animation: sideIn .12s ease-out; }
+@keyframes sideIn { from { opacity: .4; } to { opacity: 1; } }
+
+/* 独立掌握度的进度条——和完成度区分开，避免两条一模一样的蓝条 */
+.bar.solo > i { background: var(--primary-mkt); }
+
+/* ------------------------------------------------------ 三级提示 */
+.hb-meta { margin-top: 6px; font-size: 11.5px; color: var(--ink-3); }
+.hb-more { margin-top: 9px; font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.hint-tier { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.hint-tier .ht-h { display: flex; align-items: center; gap: 7px; font-weight: 640; font-size: 13px; color: var(--ink); }
+.hint-tier .ht-n {
+  width: 17px; height: 17px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: grid; place-items: center; font-size: 10.5px; font-weight: 700; font-family: var(--mono);
+}
+.hint-tier .ht-b { margin-top: 5px; font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+.hint-tier .ht-step {
+  margin-top: 6px; padding: 7px 9px; background: var(--accent-soft); border-radius: 6px;
+  font-size: 12px; color: var(--ink-2); line-height: 1.55;
+}
+.hint-tier .ht-refs { margin: 7px 0 0; padding-left: 17px; font-size: 12.5px; color: var(--ink-2); }
+.hint-tier .ht-refs li { margin-bottom: 3px; }
+.hint-tier .ht-x {
+  display: inline-block; font-size: 10px; font-weight: 700; color: var(--primary-mkt);
+  background: var(--primary-mkt-soft); border-radius: 4px; padding: 0 5px; margin-right: 5px; vertical-align: 1px;
+}
+
+/* ------------------------------------------------------ 顶部 ··· 菜单 */
+.more-wrap { position: relative; display: inline-block; }
+.more-menu {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 40; min-width: 168px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 9px;
+  box-shadow: var(--shadow-md); padding: 5px; display: flex; flex-direction: column;
+}
+.more-menu[hidden] { display: none; }
+.more-menu button {
+  border: none; background: none; text-align: left; padding: 7px 10px; border-radius: 6px;
+  font-size: 13px; color: var(--ink-2); white-space: nowrap;
+}
+.more-menu button:hover { background: var(--surface-3); color: var(--ink); }
+/* 查看答案比提示再弱一级：不并排、放在分隔线之后、危险色 */
+.more-menu button.danger { color: var(--err); }
+.more-menu button.danger:hover { background: var(--err-soft); }
+.more-sep { height: 1px; background: var(--border); margin: 5px 3px; }
+
+/* ------------------------------------------------------ 手机端定位提示 */
+.mobile-note {
+  display: none; margin: 10px 18px 0; padding: 9px 12px; border-radius: 8px;
+  background: var(--warn-soft); border-left: 3px solid var(--warn);
+  font-size: 12.5px; color: var(--ink-2); line-height: 1.55;
+}
+@media (max-width: 860px) { .mobile-note { display: block; } }
+
+/* ------------------------------------------------------ 模型库搜索 */
+.srch {
+  flex: 1 1 240px; min-width: 190px; max-width: 380px;
+  padding: 6px 12px; border-radius: 8px; font-size: 13px;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink);
+  font-family: inherit; outline: none;
+}
+.srch:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.srch::placeholder { color: var(--ink-3); }
+
+/* ------------------------------------------------------ 首页轨道选择 */
+.trk-pick-home {
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); background: var(--surface);
+  padding: 22px 24px; margin-bottom: 22px;
+}
+.trk-pick-home .tph-h { margin-bottom: 16px; }
+.tph-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.tph-card {
+  text-align: left; padding: 13px 15px; border-radius: var(--radius);
+  border: 1px solid var(--border-strong); background: var(--surface-2);
+  display: flex; flex-direction: column; gap: 4px; transition: all .13s;
+}
+.tph-card:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
+.tph-card b { font-size: 15px; color: var(--ink); letter-spacing: -.01em; }
+.tph-card .tph-who { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
+.tph-card .tph-n { font-size: 11.5px; color: var(--ink-3); font-family: var(--mono); margin-top: 2px; }
