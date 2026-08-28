@@ -16041,12 +16041,14 @@ window.FML_CONFIG = {
     });
   }
 
-  function bindCards() {
-    Array.prototype.forEach.call($app.querySelectorAll('[data-goto]'), function (n) {
+  /** @param root 只绑定这棵子树；不传就绑定整页（局部刷新后要用它补绑新节点） */
+  function bindCards(root) {
+    const scopeEl = root || $app;
+    Array.prototype.forEach.call(scopeEl.querySelectorAll('[data-goto]'), function (n) {
       n.onclick = function (e) { if (e.target.tagName === 'A') return; go(n.getAttribute('data-goto')); };
     });
     /* 轨道切换：换掉 DB.path 再重渲染即可，进度是按模型 id 存的，不受影响 */
-    Array.prototype.forEach.call($app.querySelectorAll('[data-track]'), function (n) {
+    Array.prototype.forEach.call(scopeEl.querySelectorAll('[data-track]'), function (n) {
       n.onclick = function () {
         if (!DB.setTrack) return;
         DB.setTrack(n.getAttribute('data-track'));
@@ -16448,7 +16450,9 @@ window.FML_CONFIG = {
   /* =========================================================================
    * 模型列表
    * =======================================================================*/
-  function viewBrowse(scope) {
+  /* 按当前筛选条件算出模型列表。抽出来是为了让搜索能只刷新结果区，
+     不必重渲染整页——重渲染会销毁输入框，中文输入法正在拼字时就会丢字。 */
+  function browseList(scope) {
     let list = DB.models.slice();
     if (scope === 'secondary' || scope === 'primary') list = list.filter((m) => m.market === scope);
     if (S.filterLevel !== 'all') list = list.filter((m) => String(m.level) === S.filterLevel);
@@ -16467,6 +16471,17 @@ window.FML_CONFIG = {
       });
     }
     list.sort((a, b) => (a.level - b.level) || a.title.localeCompare(b.title, 'zh'));
+    return list;
+  }
+
+  function browseCards(list) {
+    return list.length
+      ? '<div class="grid-cards">' + list.map(modelCard).join('') + '</div>'
+      : '<div class="empty"><div class="big">∅</div>没有符合条件的模型，换个筛选试试。</div>';
+  }
+
+  function viewBrowse(scope) {
+    const list = browseList(scope);
 
     const title = scope === 'secondary' ? '二级市场模型' : scope === 'primary' ? '一级市场模型' : '全部模型';
     const desc = scope === 'secondary'
@@ -16481,16 +16496,29 @@ window.FML_CONFIG = {
     setTimeout(function () {
       const sb = document.getElementById('srch');
       if (sb) {
-        /* 和筛选按钮走同一条重渲染路径，避免两套逻辑。
-           重渲染会销毁输入框，所以要把焦点和光标位置还回去。 */
-        sb.oninput = function () {
+        /* 两件事一起解决中文输入：
+           一、只刷新结果区，不重渲染整页——输入框自始至终是同一个 DOM 节点，
+               不会在拼字过程中被销毁重建；
+           二、compositionstart/end 期间不触发搜索。拼音输入法在选字之前，
+               input 事件里拿到的是「zhongguo」这种中间态，拿它去搜没有意义，
+               而且会让结果区乱跳。 */
+        let composing = false;
+        const run = function () {
           S.q = sb.value;
+          const host = document.getElementById('browseResults');
+          const cnt = document.getElementById('browseCount');
+          if (!host) return;
+          const ls = browseList(scope);
+          host.innerHTML = browseCards(ls);
+          if (cnt) cnt.textContent = '共 ' + ls.length + ' 个';
+          bindCards(host);
+        };
+        sb.addEventListener('compositionstart', function () { composing = true; });
+        sb.addEventListener('compositionend', function () { composing = false; run(); });
+        sb.oninput = function () {
+          if (composing) return;
           clearTimeout(sb._t);
-          sb._t = setTimeout(function () {
-            shell(viewBrowse(scope));
-            const nb = document.getElementById('srch');
-            if (nb) { nb.focus(); nb.setSelectionRange(nb.value.length, nb.value.length); }
-          }, 160);
+          sb._t = setTimeout(run, 140);
         };
       }
       Array.prototype.forEach.call($app.querySelectorAll('[data-seg]'), function (segEl) {
@@ -16510,10 +16538,9 @@ window.FML_CONFIG = {
         '<input class="srch" id="srch" type="search" placeholder="搜索：LBO / 苹果 / 商誉 / 营运资本 / 30 分钟" value="' + esc(S.q || '') + '">' +
         seg('level', S.filterLevel, [{ v: 'all', t: '全部难度' }, { v: '1', t: '简单' }, { v: '2', t: '中级' }, { v: '3', t: '复杂' }]) +
         seg('ind', S.filterIndustry, [{ v: 'all', t: '全部行业' }].concat(DB.industries.map((i) => ({ v: i.id, t: i.name })))) +
-        '<span style="margin-left:auto;font-size:12.5px;color:var(--ink-3)">共 ' + list.length + ' 个</span>' +
+        '<span id="browseCount" style="margin-left:auto;font-size:12.5px;color:var(--ink-3)">共 ' + list.length + ' 个</span>' +
       '</div>' +
-      (list.length ? '<div class="grid-cards">' + list.map(modelCard).join('') + '</div>'
-        : '<div class="empty"><div class="big">∅</div>没有符合条件的模型，换个筛选试试。</div>');
+      '<div id="browseResults">' + browseCards(list) + '</div>';
   }
 
   /* =========================================================================
