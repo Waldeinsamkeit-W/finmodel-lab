@@ -3342,7 +3342,9 @@ window.FML_CONFIG = {
       }
 
       if (embedded()) {
-        const e = new Error('这个页面被嵌在不允许下载的框架里。请在新标签页单独打开本页，或用本地版本导出。');
+        const e = new Error('分享版页面跑在受限框架里，浏览器会拦掉页面自己发起的下载。' +
+          '要导出 Excel，请用单文件版（finmodel-lab-standalone.html，双击即可打开），' +
+          '那里导出的是可以直接用 Excel 打开的 .xlsx。');
         e.code = 'sandboxed';
         throw e;
       }
