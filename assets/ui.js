@@ -223,6 +223,44 @@
     };
   }
 
+  /* 下载被拦时的进度备份：把 JSON 放进文本框让用户复制。
+     导入那边本来就接受粘贴的 JSON 文件，所以这段文字存成 .json 就能导回来。 */
+  function showCopyBackup(json) {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-mask';
+    wrap.innerHTML = '<div class="modal" style="max-width:560px">' +
+      '<div class="mh"><h2 style="margin-bottom:2px">复制进度备份</h2>' +
+        '<div style="font-size:12.5px;color:var(--ink-3)">这个页面跑在受限框架里，浏览器不让直接下载。' +
+        '把下面的内容全选复制，存成一个 <code>.json</code> 文件，以后用「导入备份」就能恢复。</div></div>' +
+      '<div class="mb">' +
+        '<textarea id="bkText" readonly spellcheck="false" style="width:100%;height:220px;font-family:var(--mono);font-size:11.5px;' +
+          'border:1px solid var(--border-strong);border-radius:8px;padding:8px 10px;background:var(--surface-2);color:var(--ink);resize:vertical"></textarea>' +
+        '<div id="bkMsg" style="font-size:12px;color:var(--ink-3);margin-top:6px"></div>' +
+      '</div>' +
+      '<div class="mf">' +
+        '<button class="btn" id="bkClose">关闭</button>' +
+        '<button class="btn primary" id="bkCopy">复制到剪贴板</button>' +
+      '</div></div>';
+    document.body.appendChild(wrap);
+    const ta = wrap.querySelector('#bkText');
+    ta.value = json;
+    const msg = wrap.querySelector('#bkMsg');
+    const close = function () { wrap.remove(); };
+    wrap.querySelector('#bkClose').onclick = close;
+    wrap.onclick = function (e) { if (e.target === wrap) close(); };
+    wrap.querySelector('#bkCopy').onclick = function () {
+      ta.focus(); ta.select();
+      const done = function () { msg.style.color = 'var(--ok)'; msg.textContent = '已复制 ' + json.length.toLocaleString() + ' 个字符'; };
+      const fail = function () { msg.textContent = '自动复制被拦了——文本已全选，按 Ctrl/Cmd + C 手动复制'; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(json).then(done, fail);
+      } else {
+        try { document.execCommand('copy') ? done() : fail(); } catch (e) { fail(); }
+      }
+    };
+    setTimeout(function () { ta.focus(); ta.select(); }, 30);
+  }
+
   function showAuthModal(mode) {
     mode = mode === 'signup' ? 'signup' : 'login';
     const wrap = document.createElement('div');
@@ -991,6 +1029,10 @@
           .then(function () { toast('进度已导出', 'ok'); })
           .catch(function (err) {
             if (err && err.code === 'declined') { toast('已取消'); return; }
+            /* 分享版（制品）里浏览器会拦掉下载，但进度备份不能因此就没有——
+               作答记录只存在这台浏览器的 localStorage 里，换设备或清缓存就没了。
+               退回成一个可全选的文本框：粗糙，但 sandbox 拦不住它。 */
+            if (err && err.code === 'sandboxed') { showCopyBackup(Store.exportJSON()); return; }
             toast('导出失败：' + err.message, 'err', 8000);
           });
       };

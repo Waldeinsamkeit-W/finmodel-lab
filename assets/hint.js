@@ -67,21 +67,47 @@
     return null;
   }
 
-  /* 模型的操作步骤里有没有点名这一行。步骤文案里普遍写着「第 12 行」「第 9–11 行」，
-     所以能直接按行号匹配——不需要给每一格额外标注它属于哪一步。 */
-  function stepFor(model, row) {
-    const hit = [];
-    (model.steps || []).forEach(function (s) {
-      const txt = String(s.d || '');
-      let m;
-      const re = /第\s*(\d{1,3})\s*(?:[–—-]\s*(\d{1,3})\s*)?行/g;
-      while ((m = re.exec(txt)) !== null) {
-        const a = parseInt(m[1], 10);
-        const b = m[2] ? parseInt(m[2], 10) : a;
-        if (row >= Math.min(a, b) && row <= Math.max(a, b)) { hit.push(s); return; }
+  /* 模型的操作步骤里有没有点名这一格。
+     两种写法都要认：小模型的步骤写「第 12 行」「第 9–11 行」，按行号匹配；
+     大模型（⭐ 完整案例）的步骤写「第 4 张表：勾稽桥」，按表序号匹配。
+     只认行号的话，1 级提示在最难的模型上覆盖率不到一半——越难的越薄，正好反了。
+     行号更具体，先试行号；没有再退到表序号。 */
+  const RE_ROW   = /第\s*(\d{1,3})\s*(?:[–—-]\s*(\d{1,3})\s*)?行/g;
+  const RE_SHEET = /第\s*(\d{1,2})\s*(?:[–—-]\s*(\d{1,2})\s*)?张表/g;
+
+  function inRange(n, m) {
+    const a = parseInt(m[1], 10);
+    const b = m[2] ? parseInt(m[2], 10) : a;
+    return n >= Math.min(a, b) && n <= Math.max(a, b);
+  }
+
+  function stepFor(model, sheetNo, row, sheetName) {
+    const steps = model.steps || [];
+    /* 先按行号；标题和正文都看，有的模型把行号写在标题里 */
+    for (let i = 0; i < steps.length; i++) {
+      const txt = String(steps[i].t || '') + ' ' + String(steps[i].d || '');
+      let m; RE_ROW.lastIndex = 0;
+      while ((m = RE_ROW.exec(txt)) !== null) if (inRange(row, m)) return steps[i];
+    }
+    /* 再按表序号 */
+    for (let i = 0; i < steps.length; i++) {
+      const txt = String(steps[i].t || '') + ' ' + String(steps[i].d || '');
+      let m; RE_SHEET.lastIndex = 0;
+      while ((m = RE_SHEET.exec(txt)) !== null) if (inRange(sheetNo, m)) return steps[i];
+    }
+    /* 最后按表名。第三种写法：「做利润表」「搭「来源与用途」」「看「假设」这张表」。
+       标题里出现表名就认（标题短而刻意）；正文只认带「」引号的，
+       否则「教学假设」这种散文会把名叫「假设」的表匹配到一堆无关步骤上。 */
+    if (sheetName) {
+      const quoted = '「' + sheetName + '」';
+      for (let i = 0; i < steps.length; i++) {
+        if (String(steps[i].t || '').indexOf(sheetName) >= 0) return steps[i];
       }
-    });
-    return hit[0] || null;
+      for (let i = 0; i < steps.length; i++) {
+        if (String(steps[i].d || '').indexOf(quoted) >= 0) return steps[i];
+      }
+    }
+    return null;
   }
 
   /** 公式骨架：保留运算结构，引用换成 ___ */
@@ -104,7 +130,8 @@
 
     if (tier === 1) {
       const sec = sectionOf(sheet, row);
-      const st = stepFor(model, row);
+      const sheetNo = (model.sheets || []).indexOf(sheet) + 1;
+      const st = stepFor(model, sheetNo, row, sheet.name);
       const bits = [];
       if (sec) bits.push('这一格属于「' + sec + '」。');
       if (r.note) bits.push(r.note + '。');
