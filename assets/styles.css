@@ -826,3 +826,13 @@ kbd {
 .tph-card b { font-size: 15px; color: var(--ink); letter-spacing: -.01em; }
 .tph-card .tph-who { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
 .tph-card .tph-n { font-size: 11.5px; color: var(--ink-3); font-family: var(--mono); margin-top: 2px; }
+
+/* 溯源状态：已核对 vs 仅标注。两者视觉必须能分开，
+   否则一条没人核过的来源看起来和核过的一样，整套溯源就成了装饰。 */
+.prov-ok, .prov-un {
+  display: inline-block; font-size: 10.5px; font-weight: 700;
+  border-radius: 4px; padding: 0 5px; margin-left: 4px; vertical-align: 1px;
+  white-space: nowrap;
+}
+.prov-ok { color: var(--ok); background: var(--ok-soft); }
+.prov-un { color: var(--warn); background: var(--warn-soft); }

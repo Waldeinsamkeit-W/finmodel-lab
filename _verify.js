@@ -173,7 +173,24 @@
     });
     const tally = {};
     rows.forEach(function (r) { r.缺.forEach(function (g) { tally[g] = (tally[g] || 0) + 1; }); });
+
+    /* 溯源进度。构造数据单列——它们没有原文可指，现在这样就是正确终态，
+       混在一起统计会把「还差多少」夸大一倍。 */
+    const st = { synthetic: [], none: [], stated: [], verified: [] };
+    global.DB.models.forEach(function (m) { st[global.Prov.status(m)].push(m.id); });
+    const needSource = st.none.length + st.stated.length + st.verified.length;
+    const done = st.verified.length;
+
     return {
+      溯源进度: {
+        需溯源: needSource,
+        已核对: done,
+        已标注未核: st.stated.length,
+        未标注: st.none.length,
+        构造数据无需溯源: st.synthetic.length,
+        完成度: needSource ? (done / needSource * 100).toFixed(1) + '%' : '—'
+      },
+      状态明细: st,
       models: rows.length,
       口径可推出: rows.filter(function (r) { return !r.推不出币种 && !r.推不出量级; }).length,
       推不出币种: rows.filter(function (r) { return r.推不出币种; }).map(function (r) { return r.id; }),

@@ -99,14 +99,35 @@
     };
   };
 
-  /** 只有人能填的部分，缺什么列什么。 */
+  /* 数据是不是构造的。构造数据不需要原文链接——**没有原文可指**，
+     这类模型的 dataNote 已经如实声明了，那就是它正确的终态。
+     不做这个区分，「71 个模型只有 1 个有溯源」这句话就是在夸大问题：
+     实际只有 44 个需要，另外 26 个现在这样就是对的。 */
+  const RE_SYNTHETIC = /不涉及任何真实|全部为教学假设|构造的最小算例|不对应任何一家具体公司|不对应任何真实公司|不对应任何一个具体项目|不对应任何一家公司|不涉及任何真实品种/;
+
+  Prov.isSynthetic = function (model) {
+    return RE_SYNTHETIC.test(String(model.dataNote || ''));
+  };
+
+  /** 溯源状态：none 未标注 / stated 已标注但没人核过 / verified 已对着原文核过 */
+  Prov.status = function (model) {
+    if (Prov.isSynthetic(model)) return 'synthetic';
+    const s = model.source || {};
+    if (!s.docs || !s.docs.length) return 'none';
+    const allVerified = s.docs.every(function (d) { return d.verified && d.url && (d.page || d.statement); });
+    return allVerified ? 'verified' : 'stated';
+  };
+
+  /** 只有人能填的部分，缺什么列什么。构造数据返回空数组。 */
   Prov.gaps = function (model) {
+    if (Prov.isSynthetic(model)) return [];
     const s = model.source || {};
     const out = [];
     if (!s.docs || !s.docs.length) out.push('原始文件（公告 / 年报 / 10-K 的名称与期间）');
     else {
       if (!s.docs.some(function (d) { return d.url; })) out.push('原文链接');
       if (!s.docs.some(function (d) { return d.page || d.statement; })) out.push('报表名或页码');
+      if (!s.docs.some(function (d) { return d.verified; })) out.push('对着原文核对（docs[].verified）');
     }
     if (!s.asOf) out.push('数据截止日');
     if (!s.version) out.push('模型版本');

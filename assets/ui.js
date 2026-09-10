@@ -1665,9 +1665,14 @@
       html += '<div class="prov-docs">' + src.docs.map(function (d) {
         const bits = [d.title, d.period, d.statement, d.page ? '第 ' + d.page + ' 页' : null]
           .filter(Boolean).map(esc).join(' · ');
+        /* 「已核对」和「照抄自数据说明」必须分开标。
+           一条没人核过的来源，看起来和核过的一模一样，那这套溯源就是装饰。 */
+        const mark = d.verified
+          ? '<span class="prov-ok" title="已对着原文核对">✓ 已核对</span>'
+          : '<span class="prov-un" title="来源已标注，但尚未对着原文逐项核对">待核对</span>';
         return d.url
-          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a></div>'
-          : '<div>' + bits + '</div>';
+          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a> ' + mark + '</div>'
+          : '<div>' + bits + ' ' + mark + '</div>';
       }).join('') + '</div>';
     }
     /* 缺口只在「已经声明了 source 但填了一半」时提示。
