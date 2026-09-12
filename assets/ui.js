@@ -120,6 +120,7 @@
 
   function render() {
     closeDrawer();
+    if (S.model) commitPending();
     if (S.model && S.startTs) { Store.addSeconds(S.model.id, Math.round((Date.now() - S.startTs) / 1000)); S.startTs = 0; }
     const r = parseRoute();
     S.model = null; S.actInfo = null; S.hintFor = null;
@@ -1044,8 +1045,10 @@
           const f = inp.files[0]; if (!f) return;
           const rd = new FileReader();
           rd.onload = function () {
-            try { Store.importJSON(rd.result); toast('导入成功', 'ok'); render(); }
-            catch (e) { toast('导入失败：' + e.message, 'err'); }
+            try {
+              const r = Store.importJSON(rd.result);
+              toast('导入成功，' + r.models + ' 个模型的记录已恢复', 'ok'); render();
+            } catch (e) { toast('导入失败，原有进度未改动：' + e.message, 'err', 9000); }
           };
           rd.readAsText(f);
         };
@@ -1185,6 +1188,7 @@
             '<div class="more-menu" id="moreMenu" hidden>' +
               '<button id="btnXlsx">导出 Excel</button>' +
               '<button id="btnReset">重置本模型</button>' +
+              '<button id="btnRestore">恢复上次存档</button>' +
               '<div class="more-sep"></div>' +
               '<button id="btnReveal" class="danger">查看答案</button>' +
             '</div>' +
@@ -1215,10 +1219,28 @@
     };
     document.getElementById('btnCheck').onclick = function () { checkAll(); };
     document.getElementById('btnReset').onclick = function () {
-      if (!confirm('清空本模型的全部作答？清空前会自动存一个还原点。')) return;
-      Store.resetModel(m.id); S.inputs = {}; rebuild(); mountGrid(); renderSide(); toast('已清空');
+      closeMore();
+      if (!confirm('重置本模型？作答、提示和尝试记录都会清零，相当于重新练一遍。\n重置前会自动存一个还原点，可以从「···」里恢复。')) return;
+      Store.resetModel(m.id); S.inputs = {}; rebuild(); mountGrid(); renderSide(); toast('已重置，还原点已存');
+    };
+    /* 还原点以前只存不读——存储层有 restore()，界面却没有任何入口 */
+    document.getElementById('btnRestore').onclick = function () {
+      closeMore();
+      const snaps = Store.model(m.id).snapshots || [];
+      if (!snaps.length) { toast('还没有存档可恢复'); return; }
+      const s = snaps[0];
+      const n = Object.keys(s.inputs || {}).length;
+      if (!confirm('恢复到「' + s.note + '」（' + fullTime(s.ts) + '，' + n + ' 格作答）？\n当前的作答会被覆盖，但会先自动存一个还原点。')) return;
+      Store.snapshot(m.id, '恢复前自动存档');
+      /* 刚存的那条排在 [0]，要恢复的变成 [1] */
+      if (!Store.restore(m.id, 1)) { toast('恢复失败', 'err'); return; }
+      S.inputs = Store.model(m.id).inputs;
+      rebuild(); mountGrid(); updateProgress(); renderSide();
+      toast('已恢复 ' + n + ' 格作答', 'ok');
     };
     document.getElementById('btnXlsx').onclick = function (e) {
+      closeMore();
+      commitPending();
       if (!window.Xlsx || !window.Save) { toast('导出模块未加载', 'err'); return; }
       const withAns = e.altKey || e.shiftKey;
       const btn = this;
@@ -1273,6 +1295,19 @@
     });
 
     renderTabs(); mountGrid(); renderSide();
+  }
+
+  /* 把正在编辑但还没按回车的公式先提交掉。
+     检查、导出、离开模型之前都要调——否则学生在公式栏敲完最后一格直接点
+     「检查全部」，那一格既不参与检查，返回后还会丢。
+     公式栏聚焦本身就会开始编辑，所以 blur 里那条 !Grid.isEditing() 的守卫
+     在这条路径上永远不成立，等于从没提交过。 */
+  function commitPending() {
+    if (!window.Grid) return false;
+    if (Grid.isEditing && Grid.isEditing()) { Grid.commitEdit(); return true; }
+    const fx = document.getElementById('fxInput');
+    if (fx && !fx.disabled && fx.dataset.dirty === '1') { applyFx(); return true; }
+    return false;
   }
 
   function applyFx() {
@@ -1381,7 +1416,14 @@
     }
   }
 
-  function setInput(sheetName, col, row, val) {
+  /**
+   * @param source 'user' | 'reveal' | 'restore' —— 这个值决定要不要记尝试。
+   *   以前靠「修改前 revealed 有没有置位」来推断来源，而 revealCurrent 是
+   *   先 setInput 再 markRevealed，于是看答案那一刻被当成了用户的首次作答，
+   *   还记成了首次正确。来源必须由调用方显式声明，不能事后推断。
+   */
+  function setInput(sheetName, col, row, val, source) {
+    source = source || 'user';
     const key = sheetName + '!' + FML.addr(col, row);
     const v = String(val === undefined || val === null ? '' : val).trim();
     if ((S.inputs[key] || '') === v) return;
@@ -1390,8 +1432,8 @@
     S.wb.reset(); S.sol.reset(); S.grader.reset();
     /* 记录尝试与首次结果。首次正确率是学习分析里信息量最大的单一指标，
        而且只有在这里能拿到——判定完成之后再回头统计是补不出来的。
-       清空单元格不算一次尝试；填入参考公式（revealed）也不算。 */
-    if (v !== '' && !Store.model(S.model.id).revealed[key]) {
+       只有用户自己提交的才算：清空不算，看答案不算，恢复存档不算。 */
+    if (source === 'user' && v !== '' && !Store.model(S.model.id).revealed[key]) {
       Store.bumpAttempt(S.model.id, key);
       Store.markFirstResult(S.model.id, key, S.grader.of(sheetName, col, row).ok);
     }
@@ -1399,17 +1441,35 @@
     flashSaved();
   }
 
+  /* 「已保存」由存储层的真实写入结果驱动，不再是 320ms 定时器到点就变绿。
+     写入失败时红点常驻、文字说明原因，并把「导出备份」当出路指出来——
+     内存里的进度还在，只是落不了盘。 */
   function flashSaved() {
     const d = document.getElementById('saveDot');
     if (!d) return;
+    d.classList.remove('failed');
     d.classList.add('pending');
     d.querySelector('span').textContent = '保存中…';
-    clearTimeout(flashSaved._t);
-    flashSaved._t = setTimeout(function () {
-      d.classList.remove('pending');
-      d.querySelector('span').textContent = '已保存 · ' + fullTime(Store.model(S.model.id).updatedAt).slice(11);
-    }, 320);
   }
+  function paintSaveState(st) {
+    const d = document.getElementById('saveDot');
+    if (!d || !S.model) return;
+    d.classList.remove('pending');
+    if (st.ok) {
+      d.classList.remove('failed');
+      d.querySelector('span').textContent = '已保存 · ' + fullTime(st.at).slice(11);
+      d.title = '';
+    } else {
+      d.classList.add('failed');
+      d.querySelector('span').textContent = '未保存：' + st.err;
+      d.title = '这次改动没有写进浏览器。可以先从进度页「导出备份」把当前进度存成文件。';
+      if (!paintSaveState._warned) {
+        paintSaveState._warned = true;
+        toast('进度保存失败：' + st.err + '。内存里的作答还在，建议立刻从进度页导出备份。', 'err', 12000);
+      }
+    }
+  }
+  Store.onSave(paintSaveState);
 
   function scoreAll() {
     /* 判定结果在 grader 里按格缓存，只有 setInput 会让它失效。
@@ -1425,6 +1485,7 @@
   }
 
   function checkAll() {
+    commitPending();
     S.showChecks = true;
     const s = updateProgress();
     Grid.refresh(); renderSide();
@@ -1472,8 +1533,10 @@
         '\n\n确定要看答案吗？';
       if (!window.confirm(msg)) return;
     }
-    setInput(info.sheet, info.col, info.row, info.def.sol);
+    /* 先标记再填入，且来源显式为 reveal——两道保险，哪一道漏了都不会把
+       看答案记成用户作答。 */
     Store.markRevealed(S.model.id, key);
+    setInput(info.sheet, info.col, info.row, info.def.sol, 'reveal');
     Grid.refresh(); syncFx(); renderSide();
     toast('已填入参考公式，这一格不计入独立掌握度', 'warn', 5000);
   }
@@ -1769,7 +1832,18 @@
     /* theme = 'auto' 时不写 data-theme，交给 prefers-color-scheme 和宿主页面的切换器 */
     const th = Store.prefs().theme;
     if (th === 'dark' || th === 'light') document.documentElement.setAttribute('data-theme', th);
-    window.addEventListener('hashchange', render);
+    /* 刷新 / 关闭标签页前把编辑中的公式提交掉，并**立刻落盘**。
+     store.js 自己的 beforeunload 注册得更早、跑得也更早，所以它 flush 的时候
+     这里还没提交；提交走的又是 250ms 延迟保存，页面已经没了。
+     两个事件都挂：移动端 Safari 不触发 beforeunload，桌面端 pagehide 有时不触发。
+     flush 是幂等的，跑两遍没有副作用。 */
+  function commitAndFlush() {
+    if (!S.model) return;
+    if (commitPending()) Store.flush();
+  }
+  window.addEventListener('pagehide', commitAndFlush);
+  window.addEventListener('beforeunload', commitAndFlush);
+  window.addEventListener('hashchange', render);
     render();
 
     /* 账号是可选的：没配 config.js 就整块跳过 */

@@ -445,6 +445,10 @@ button { font-family: inherit; font-size: inherit; cursor: pointer; }
 .save-dot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
 .save-dot i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
 .save-dot.pending i { background: var(--warn); }
+.save-dot.failed { color: var(--err); font-weight: 600; }
+.save-dot.failed i { background: var(--err); animation: savefail 1.2s ease-in-out infinite; }
+@keyframes savefail { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .save-dot.failed i { animation: none; } }
 
 .lab-body { flex: 1; display: flex; min-height: 0; }
 .lab-side {
@@ -2194,9 +2198,26 @@ window.FML_CONFIG = {
   }
 
   let saveTimer = null;
+  /* 最近一次落盘的结果。界面上的「已保存」必须由它驱动，
+     以前是写不写得进去都显示已保存——隐私模式、配额满、存储被禁用，
+     用户看着绿点做了两小时，关掉全没了。 */
+  const saveState = { ok: true, err: null, at: 0 };
+  const listeners = [];
+  function notify() { listeners.forEach(function (fn) { try { fn(saveState); } catch (e) { /* 监听者自己的错 */ } }); }
+
   function flush() {
-    try { global.localStorage.setItem(KEY, JSON.stringify(state)); }
-    catch (e) { console.warn('进度保存失败（可能是浏览器隐私模式）', e); }
+    try {
+      global.localStorage.setItem(KEY, JSON.stringify(state));
+      saveState.ok = true; saveState.err = null; saveState.at = nowTs();
+    } catch (e) {
+      saveState.ok = false;
+      saveState.err = (e && e.name === 'QuotaExceededError') ? '浏览器存储空间已满'
+        : '浏览器不允许写入存储（隐私模式或已禁用）';
+      saveState.at = nowTs();
+      console.warn('进度保存失败', e);
+    }
+    notify();
+    return saveState.ok;
   }
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
@@ -2321,9 +2342,17 @@ window.FML_CONFIG = {
     },
 
     /** 存一个还原点，便于回到上一次的状态 */
+    /* 快照要存完整的学习记录，不只是作答。以前只存 inputs，恢复之后作答回来了、
+       提示和尝试记录却还是清空后的——统计口径就对不上了。 */
     snapshot: function (modelId, note) {
       const r = modelRec(modelId);
-      r.snapshots.unshift({ ts: nowTs(), note: note || '自动存档', inputs: JSON.parse(JSON.stringify(r.inputs)), correct: r.correct, total: r.total });
+      const cp = function (o) { return JSON.parse(JSON.stringify(o || {})); };
+      r.snapshots.unshift({
+        ts: nowTs(), note: note || '自动存档',
+        inputs: cp(r.inputs), revealed: cp(r.revealed), hints: cp(r.hints),
+        attempts: cp(r.attempts), firstOk: cp(r.firstOk),
+        correct: r.correct, total: r.total
+      });
       if (r.snapshots.length > MAX_SNAPSHOTS) r.snapshots.length = MAX_SNAPSHOTS;
       scheduleSave();
     },
@@ -2332,16 +2361,24 @@ window.FML_CONFIG = {
       const r = modelRec(modelId);
       const s = r.snapshots[idx];
       if (!s) return false;
-      r.inputs = JSON.parse(JSON.stringify(s.inputs));
+      const cp = function (o) { return JSON.parse(JSON.stringify(o || {})); };
+      r.inputs = cp(s.inputs);
+      /* 老快照没有这几项，恢复成空而不是保留当前值——否则会把两次练习混在一起 */
+      r.revealed = cp(s.revealed); r.hints = cp(s.hints);
+      r.attempts = cp(s.attempts); r.firstOk = cp(s.firstOk);
+      r.correct = s.correct || 0;
       r.updatedAt = nowTs();
       scheduleSave();
       return true;
     },
 
+    /* 重置 = 重新练习。作答、看答案、提示、尝试、首次正确全部归零——
+       以前只清前三项，提示记录留着，重做一遍时独立掌握度还带着上次的扣分。 */
     resetModel: function (modelId) {
       const r = modelRec(modelId);
-      Store.snapshot(modelId, '清空前自动存档');
-      r.inputs = {}; r.revealed = {}; r.correct = 0;
+      Store.snapshot(modelId, '重置前自动存档');
+      r.inputs = {}; r.revealed = {}; r.hints = {}; r.attempts = {}; r.firstOk = {};
+      r.correct = 0;
       r.updatedAt = nowTs();
       scheduleSave();
     },
@@ -2366,18 +2403,66 @@ window.FML_CONFIG = {
 
     exportJSON: function () { return JSON.stringify(load(), null, 2); },
 
+    /* 导入 = 先在副本上完成全部校验和补齐，确认没问题才替换内存与存储。
+       以前只查一层 obj.models 就 state = obj 然后 flush()——
+       一个 {"models":{"x":null}} 就能通过，把旧存档覆盖掉，
+       然后 summary() 读 null.inputs 才炸，界面报「导入失败」但存档已经没了。 */
     importJSON: function (text) {
-      const obj = JSON.parse(text);
-      if (!obj || !obj.models) throw new Error('文件格式不对');
-      state = obj;
-      if (!state.prefs) state.prefs = { theme: 'auto' };
-      flush();
-      return true;
+      let obj;
+      try { obj = JSON.parse(text); } catch (e) { throw new Error('不是合法的 JSON 文件'); }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('文件格式不对：顶层不是对象');
+      if (!obj.models || typeof obj.models !== 'object' || Array.isArray(obj.models)) throw new Error('文件格式不对：缺少 models');
+      if (obj.version !== undefined && obj.version !== 1) throw new Error('备份版本 ' + obj.version + ' 不支持（当前为 1）');
+
+      /* 在副本上逐条校验并补齐字段，任何一条不合法就整体拒绝 */
+      const next = emptyState();
+      if (obj.prefs && typeof obj.prefs === 'object') next.prefs = obj.prefs;
+      if (typeof obj.createdAt === 'number') next.createdAt = obj.createdAt;
+      const isObj = function (x) { return x && typeof x === 'object' && !Array.isArray(x); };
+      const ids = Object.keys(obj.models);
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i], r = obj.models[id];
+        if (!isObj(r)) throw new Error('模型「' + id + '」的记录不是对象');
+        if (r.inputs !== undefined && !isObj(r.inputs)) throw new Error('模型「' + id + '」的 inputs 不合法');
+        const rec = {
+          inputs: {}, startedAt: typeof r.startedAt === 'number' ? r.startedAt : nowTs(),
+          updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : nowTs(),
+          lastCell: typeof r.lastCell === 'string' ? r.lastCell : null,
+          lastSheet: typeof r.lastSheet === 'number' ? r.lastSheet : 0,
+          correct: 0, total: 0,
+          revealed: isObj(r.revealed) ? r.revealed : {},
+          hints: isObj(r.hints) ? r.hints : {},
+          attempts: isObj(r.attempts) ? r.attempts : {},
+          firstOk: isObj(r.firstOk) ? r.firstOk : {},
+          snapshots: Array.isArray(r.snapshots) ? r.snapshots.filter(isObj) : [],
+          seconds: typeof r.seconds === 'number' ? r.seconds : 0
+        };
+        /* inputs 的值只收字符串；别的类型丢掉而不是带进来炸公式引擎 */
+        const ks = Object.keys(r.inputs || {});
+        for (let k = 0; k < ks.length; k++) {
+          const v = r.inputs[ks[k]];
+          if (typeof v === 'string' && v !== '') rec.inputs[ks[k]] = v;
+        }
+        /* 不信任备份里的 correct/total——完成度由 grader 按现在的判定规则重算 */
+        next.models[id] = rec;
+      }
+      next.updatedAt = nowTs();
+
+      /* 走到这里才碰真实状态。先留一份恢复副本再替换。 */
+      const before = JSON.stringify(state);
+      state = next;
+      if (!flush()) {
+        state = JSON.parse(before);
+        throw new Error('导入内容合法，但写入浏览器存储失败：' + (saveState.err || '未知原因') + '。旧存档未被改动。');
+      }
+      return { models: ids.length };
     },
 
     clearAll: function () { state = emptyState(); flush(); },
 
-    flush: flush
+    flush: flush,
+    saveState: function () { return saveState; },
+    onSave: function (fn) { if (typeof fn === 'function') listeners.push(fn); }
   };
 
   /* 页面关闭前强制落盘 */
@@ -16140,6 +16225,7 @@ window.FML_CONFIG = {
 
   function render() {
     closeDrawer();
+    if (S.model) commitPending();
     if (S.model && S.startTs) { Store.addSeconds(S.model.id, Math.round((Date.now() - S.startTs) / 1000)); S.startTs = 0; }
     const r = parseRoute();
     S.model = null; S.actInfo = null; S.hintFor = null;
@@ -17064,8 +17150,10 @@ window.FML_CONFIG = {
           const f = inp.files[0]; if (!f) return;
           const rd = new FileReader();
           rd.onload = function () {
-            try { Store.importJSON(rd.result); toast('导入成功', 'ok'); render(); }
-            catch (e) { toast('导入失败：' + e.message, 'err'); }
+            try {
+              const r = Store.importJSON(rd.result);
+              toast('导入成功，' + r.models + ' 个模型的记录已恢复', 'ok'); render();
+            } catch (e) { toast('导入失败，原有进度未改动：' + e.message, 'err', 9000); }
           };
           rd.readAsText(f);
         };
@@ -17205,6 +17293,7 @@ window.FML_CONFIG = {
             '<div class="more-menu" id="moreMenu" hidden>' +
               '<button id="btnXlsx">导出 Excel</button>' +
               '<button id="btnReset">重置本模型</button>' +
+              '<button id="btnRestore">恢复上次存档</button>' +
               '<div class="more-sep"></div>' +
               '<button id="btnReveal" class="danger">查看答案</button>' +
             '</div>' +
@@ -17235,10 +17324,28 @@ window.FML_CONFIG = {
     };
     document.getElementById('btnCheck').onclick = function () { checkAll(); };
     document.getElementById('btnReset').onclick = function () {
-      if (!confirm('清空本模型的全部作答？清空前会自动存一个还原点。')) return;
-      Store.resetModel(m.id); S.inputs = {}; rebuild(); mountGrid(); renderSide(); toast('已清空');
+      closeMore();
+      if (!confirm('重置本模型？作答、提示和尝试记录都会清零，相当于重新练一遍。\n重置前会自动存一个还原点，可以从「···」里恢复。')) return;
+      Store.resetModel(m.id); S.inputs = {}; rebuild(); mountGrid(); renderSide(); toast('已重置，还原点已存');
+    };
+    /* 还原点以前只存不读——存储层有 restore()，界面却没有任何入口 */
+    document.getElementById('btnRestore').onclick = function () {
+      closeMore();
+      const snaps = Store.model(m.id).snapshots || [];
+      if (!snaps.length) { toast('还没有存档可恢复'); return; }
+      const s = snaps[0];
+      const n = Object.keys(s.inputs || {}).length;
+      if (!confirm('恢复到「' + s.note + '」（' + fullTime(s.ts) + '，' + n + ' 格作答）？\n当前的作答会被覆盖，但会先自动存一个还原点。')) return;
+      Store.snapshot(m.id, '恢复前自动存档');
+      /* 刚存的那条排在 [0]，要恢复的变成 [1] */
+      if (!Store.restore(m.id, 1)) { toast('恢复失败', 'err'); return; }
+      S.inputs = Store.model(m.id).inputs;
+      rebuild(); mountGrid(); updateProgress(); renderSide();
+      toast('已恢复 ' + n + ' 格作答', 'ok');
     };
     document.getElementById('btnXlsx').onclick = function (e) {
+      closeMore();
+      commitPending();
       if (!window.Xlsx || !window.Save) { toast('导出模块未加载', 'err'); return; }
       const withAns = e.altKey || e.shiftKey;
       const btn = this;
@@ -17293,6 +17400,19 @@ window.FML_CONFIG = {
     });
 
     renderTabs(); mountGrid(); renderSide();
+  }
+
+  /* 把正在编辑但还没按回车的公式先提交掉。
+     检查、导出、离开模型之前都要调——否则学生在公式栏敲完最后一格直接点
+     「检查全部」，那一格既不参与检查，返回后还会丢。
+     公式栏聚焦本身就会开始编辑，所以 blur 里那条 !Grid.isEditing() 的守卫
+     在这条路径上永远不成立，等于从没提交过。 */
+  function commitPending() {
+    if (!window.Grid) return false;
+    if (Grid.isEditing && Grid.isEditing()) { Grid.commitEdit(); return true; }
+    const fx = document.getElementById('fxInput');
+    if (fx && !fx.disabled && fx.dataset.dirty === '1') { applyFx(); return true; }
+    return false;
   }
 
   function applyFx() {
@@ -17401,7 +17521,14 @@ window.FML_CONFIG = {
     }
   }
 
-  function setInput(sheetName, col, row, val) {
+  /**
+   * @param source 'user' | 'reveal' | 'restore' —— 这个值决定要不要记尝试。
+   *   以前靠「修改前 revealed 有没有置位」来推断来源，而 revealCurrent 是
+   *   先 setInput 再 markRevealed，于是看答案那一刻被当成了用户的首次作答，
+   *   还记成了首次正确。来源必须由调用方显式声明，不能事后推断。
+   */
+  function setInput(sheetName, col, row, val, source) {
+    source = source || 'user';
     const key = sheetName + '!' + FML.addr(col, row);
     const v = String(val === undefined || val === null ? '' : val).trim();
     if ((S.inputs[key] || '') === v) return;
@@ -17410,8 +17537,8 @@ window.FML_CONFIG = {
     S.wb.reset(); S.sol.reset(); S.grader.reset();
     /* 记录尝试与首次结果。首次正确率是学习分析里信息量最大的单一指标，
        而且只有在这里能拿到——判定完成之后再回头统计是补不出来的。
-       清空单元格不算一次尝试；填入参考公式（revealed）也不算。 */
-    if (v !== '' && !Store.model(S.model.id).revealed[key]) {
+       只有用户自己提交的才算：清空不算，看答案不算，恢复存档不算。 */
+    if (source === 'user' && v !== '' && !Store.model(S.model.id).revealed[key]) {
       Store.bumpAttempt(S.model.id, key);
       Store.markFirstResult(S.model.id, key, S.grader.of(sheetName, col, row).ok);
     }
@@ -17419,17 +17546,35 @@ window.FML_CONFIG = {
     flashSaved();
   }
 
+  /* 「已保存」由存储层的真实写入结果驱动，不再是 320ms 定时器到点就变绿。
+     写入失败时红点常驻、文字说明原因，并把「导出备份」当出路指出来——
+     内存里的进度还在，只是落不了盘。 */
   function flashSaved() {
     const d = document.getElementById('saveDot');
     if (!d) return;
+    d.classList.remove('failed');
     d.classList.add('pending');
     d.querySelector('span').textContent = '保存中…';
-    clearTimeout(flashSaved._t);
-    flashSaved._t = setTimeout(function () {
-      d.classList.remove('pending');
-      d.querySelector('span').textContent = '已保存 · ' + fullTime(Store.model(S.model.id).updatedAt).slice(11);
-    }, 320);
   }
+  function paintSaveState(st) {
+    const d = document.getElementById('saveDot');
+    if (!d || !S.model) return;
+    d.classList.remove('pending');
+    if (st.ok) {
+      d.classList.remove('failed');
+      d.querySelector('span').textContent = '已保存 · ' + fullTime(st.at).slice(11);
+      d.title = '';
+    } else {
+      d.classList.add('failed');
+      d.querySelector('span').textContent = '未保存：' + st.err;
+      d.title = '这次改动没有写进浏览器。可以先从进度页「导出备份」把当前进度存成文件。';
+      if (!paintSaveState._warned) {
+        paintSaveState._warned = true;
+        toast('进度保存失败：' + st.err + '。内存里的作答还在，建议立刻从进度页导出备份。', 'err', 12000);
+      }
+    }
+  }
+  Store.onSave(paintSaveState);
 
   function scoreAll() {
     /* 判定结果在 grader 里按格缓存，只有 setInput 会让它失效。
@@ -17445,6 +17590,7 @@ window.FML_CONFIG = {
   }
 
   function checkAll() {
+    commitPending();
     S.showChecks = true;
     const s = updateProgress();
     Grid.refresh(); renderSide();
@@ -17492,8 +17638,10 @@ window.FML_CONFIG = {
         '\n\n确定要看答案吗？';
       if (!window.confirm(msg)) return;
     }
-    setInput(info.sheet, info.col, info.row, info.def.sol);
+    /* 先标记再填入，且来源显式为 reveal——两道保险，哪一道漏了都不会把
+       看答案记成用户作答。 */
     Store.markRevealed(S.model.id, key);
+    setInput(info.sheet, info.col, info.row, info.def.sol, 'reveal');
     Grid.refresh(); syncFx(); renderSide();
     toast('已填入参考公式，这一格不计入独立掌握度', 'warn', 5000);
   }
@@ -17789,7 +17937,18 @@ window.FML_CONFIG = {
     /* theme = 'auto' 时不写 data-theme，交给 prefers-color-scheme 和宿主页面的切换器 */
     const th = Store.prefs().theme;
     if (th === 'dark' || th === 'light') document.documentElement.setAttribute('data-theme', th);
-    window.addEventListener('hashchange', render);
+    /* 刷新 / 关闭标签页前把编辑中的公式提交掉，并**立刻落盘**。
+     store.js 自己的 beforeunload 注册得更早、跑得也更早，所以它 flush 的时候
+     这里还没提交；提交走的又是 250ms 延迟保存，页面已经没了。
+     两个事件都挂：移动端 Safari 不触发 beforeunload，桌面端 pagehide 有时不触发。
+     flush 是幂等的，跑两遍没有副作用。 */
+  function commitAndFlush() {
+    if (!S.model) return;
+    if (commitPending()) Store.flush();
+  }
+  window.addEventListener('pagehide', commitAndFlush);
+  window.addEventListener('beforeunload', commitAndFlush);
+  window.addEventListener('hashchange', render);
     render();
 
     /* 账号是可选的：没配 config.js 就整块跳过 */

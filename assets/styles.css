@@ -436,6 +436,10 @@ button { font-family: inherit; font-size: inherit; cursor: pointer; }
 .save-dot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
 .save-dot i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
 .save-dot.pending i { background: var(--warn); }
+.save-dot.failed { color: var(--err); font-weight: 600; }
+.save-dot.failed i { background: var(--err); animation: savefail 1.2s ease-in-out infinite; }
+@keyframes savefail { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .save-dot.failed i { animation: none; } }
 
 .lab-body { flex: 1; display: flex; min-height: 0; }
 .lab-side {
