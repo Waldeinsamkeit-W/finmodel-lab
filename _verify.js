@@ -201,6 +201,87 @@
     };
   };
 
+  /* ==========================================================================
+   * verifyFuncs() —— 引擎函数对齐 Excel 的回归测试
+   *
+   * 预期值**不是引擎算出来的**，是按 Microsoft 的函数定义手工写死的。
+   * verifyAll / verifyGrading 都是拿引擎测引擎，证明的是自洽不是正确；
+   * 这里才是独立预期。前 9 条来自 2026-09 外部审查复现的偏差，全部曾经失败。
+   * ========================================================================*/
+  global.verifyFuncs = function () {
+    const F = global.FML;
+    /* 一张小工作簿：B2=-100, B3=121, C2=日期 0, C3=日期 730（相差两年） */
+    const model = { sheets: [{ name: 'T', header: ['', 'B', 'C', 'D'], rows: [
+      { label: 'r2', cells: [{ kind: 'given', v: -100 }, { kind: 'given', v: 0 },   { kind: 'given', v: 1 }] },
+      { label: 'r3', cells: [{ kind: 'given', v: 121 },  { kind: 'given', v: 730 }, { kind: 'given', v: 2 }] },
+      { label: 'r4', cells: [{ kind: 'given', v: 0 },    { kind: 'given', v: 0 },   { kind: 'given', v: 3 }] }
+    ] }] };
+    const wb = new F.Workbook(model, F.makeGetter(model, {}, true));
+    const run = function (src) {
+      try { return { ok: true, v: F.evaluate(F.compile(src), { sheet: 'T', get: wb.get.bind(wb) }) }; }
+      catch (e) { return { ok: false, err: e.message }; }
+    };
+    const near = function (a, b) { return typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 1e-6); };
+
+    /* [公式, 预期]  预期为 'ERR' 表示应报错 */
+    const CASES = [
+      /* ---- 外部审查的 9 条 ---- */
+      ['XIRR(B2:B3,C2:C3)',        0.10],           // 两年 -100→121 = 10%/年
+      ['PV(10%,1,0,110)',          -100],
+      ['PMT(10%,1,100,0,1)',       -100],
+      ['FV(10%,1,-100,0,1)',       110],
+      ['ROUND(-1.5,0)',            -2],
+      ['IFERROR(SQRT(-1),99)',     99],
+      ['IF("a"="b",1,0)',          0],
+      ['IRR(B4:B4)',               'ERR'],          // 全零
+      ['SUMPRODUCT(B2:B3,D2:D4)',  'ERR'],          // 2 对 3
+      /* ---- 同类边界，防止只修点不修面 ---- */
+      ['ROUND(2.5,0)',             3],
+      ['ROUND(-2.5,0)',            -3],
+      ['ROUND(1.005,2)',           1.01],           // 二进制误差
+      ['IF("a"="A",1,0)',          1],              // 不区分大小写
+      ['IF("b">"a",1,0)',          1],
+      ['IF(1<"a",1,0)',            1],              // 数 < 文本
+      ['IFERROR(1/0,7)',           7],
+      ['IFERROR(LN(0),5)',         5],
+      ['PMT(0,10,1000)',           -100],           // 零利率
+      ['PV(0,10,-100)',            1000],
+      ['FV(0,10,-100)',            1000],
+      ['PMT(10%,1,100)',           -110],           // 期末付默认
+      ['SUMPRODUCT(B2:B3,B2:B3)',  24641],          // 100² + 121²
+      ['IRR(B2:B3)',               0.21],           // 一期 -100→121
+      ['AVG(D2:D4)',               2],              // 别名仍可算
+      ['SQRT(-1)',                 'ERR'],          // 不包 IFERROR 时直接报错
+    ];
+
+    const fails = [];
+    CASES.forEach(function (c) {
+      const r = run(c[0]);
+      if (c[1] === 'ERR') { if (r.ok) fails.push({ f: c[0], want: '报错', got: r.v }); return; }
+      if (!r.ok) { fails.push({ f: c[0], want: c[1], got: '报错: ' + r.err }); return; }
+      if (!near(r.v, c[1])) fails.push({ f: c[0], want: c[1], got: r.v });
+    });
+
+    /* 导出分类：和 Workbook.get 的判定必须一致 */
+    const CLS = [
+      ['＝B3-B6',       'formula'], ['100+23', 'formula'], ['=SUM（D3，-D6）', 'formula'],
+      ['1,234',         'number'],  ['15%',    'number'],  ['-3.5e2',          'number'],
+      ['',              'empty'],   ['B3',     'formula']
+    ];
+    CLS.forEach(function (c) {
+      const k = F.classifyInput(c[0]).kind;
+      if (k !== c[1]) fails.push({ f: 'classify(' + c[0] + ')', want: c[1], got: k });
+    });
+    const canon = F.canonicalFormula('SUM（D3，-D6）+AVG(B2:B3)');
+    if (canon !== 'SUM(D3,-D6)+AVERAGE(B2:B3)') fails.push({ f: 'canonicalFormula', want: 'SUM(D3,-D6)+AVERAGE(B2:B3)', got: canon });
+
+    /* 区域上限：refsOf 不应展开超限区域 */
+    const big = F.refsOf('SUM(A1:Z500)', 'T');
+    if (big.length > 2) fails.push({ f: 'refsOf(A1:Z500)', want: '≤2（不展开）', got: big.length });
+
+    return { total: CASES.length + CLS.length + 2, failed: fails.length, fails: fails };
+  };
+
   global.verifyGrading = function (only) {
     const FMLg = global.FML, G = global.Grade;
     const list = global.DB.models.filter(function (m) { return !only || m.id === only; });

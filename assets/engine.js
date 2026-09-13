@@ -7,6 +7,11 @@
 (function (global) {
   'use strict';
 
+  /* 一个区域最多展开多少格。求值器和引用扫描器共用这一个数——
+     以前只有求值器有上限，refsOf() 在每次键入时都把 SUM(A1:Z500) 整个展开成
+     13,000 条引用，用户还没按回车页面就先卡住了。 */
+  const MAX_RANGE_CELLS = 4000;
+
   /* ---------------------------------------------------------------- 列号转换 */
   function colToIdx(s) {
     let n = 0;
@@ -263,6 +268,10 @@
     return s;
   }
   function irr(flows, guess) {
+    /* 没有正负交替就不存在 IRR。全零现金流以前会二分出一个 -99.99% 的假解。 */
+    const hasPos = flows.some(function (x) { return x > 0; });
+    const hasNeg = flows.some(function (x) { return x < 0; });
+    if (!hasPos || !hasNeg) throw new Error('IRR 无解：现金流需要有正有负');
     const f = function (r) { let s = 0; for (let i = 0; i < flows.length; i++) s += flows[i] / Math.pow(1 + r, i); return s; };
     let lo = -0.9999, hi = 10;
     let flo = f(lo), fhi = f(hi);
@@ -288,6 +297,76 @@
     return (lo + hi) / 2;
   }
 
+  /* XIRR：按实际日期折算（Excel 口径：按 365 天年化）。
+     以前直接调 irr()，日期参数根本没读——两笔间隔两年的现金流算出的是一年的收益率。 */
+  function xirr(flows, dates, guess) {
+    if (flows.length !== dates.length || flows.length < 2) throw new Error('XIRR：现金流与日期数量不一致');
+    const hasPos = flows.some(function (x) { return x > 0; });
+    const hasNeg = flows.some(function (x) { return x < 0; });
+    if (!hasPos || !hasNeg) throw new Error('XIRR 无解：现金流需要有正有负');
+    const d0 = dates[0];
+    const f = function (r) {
+      let s = 0;
+      for (let i = 0; i < flows.length; i++) s += flows[i] / Math.pow(1 + r, (dates[i] - d0) / 365);
+      return s;
+    };
+    let lo = -0.9999, hi = 10, flo = f(lo), fhi = f(hi);
+    if (flo * fhi > 0) {
+      let r = (guess === undefined ? 0.1 : guess);
+      for (let k = 0; k < 100; k++) {
+        const v = f(r), d = (f(r + 1e-6) - v) / 1e-6;
+        if (!isFinite(d) || Math.abs(d) < 1e-12) break;
+        const nr = r - v / d;
+        if (!isFinite(nr)) break;
+        if (Math.abs(nr - r) < 1e-10) return nr;
+        r = Math.max(nr, -0.9999);
+      }
+      throw new Error('XIRR 无解');
+    }
+    for (let k = 0; k < 200; k++) {
+      const mid = (lo + hi) / 2, fm = f(mid);
+      if (flo * fm <= 0) { hi = mid; fhi = fm; } else { lo = mid; flo = fm; }
+      if (hi - lo < 1e-12) break;
+    }
+    return (lo + hi) / 2;
+  }
+
+  /* Excel 的 ROUND 是「四舍五入、远离零」：ROUND(-1.5,0) = -2。
+     JS 的 Math.round 是「向正无穷」：Math.round(-1.5) = -1。差在负数的 .5 上。 */
+  function roundHalfAway(x, d) {
+    const f = Math.pow(10, d);
+    const s = x < 0 ? -1 : 1;
+    /* 先加一个极小量再取整，避免 1.005*100 = 100.49999 这种二进制表示误差 */
+    return s * Math.round(Math.abs(x) * f + 1e-9) / f;
+  }
+
+  /* 年金类函数的 Excel 口径：pv·(1+r)^n + pmt·(1+r·type)·((1+r)^n − 1)/r + fv = 0
+     type = 0 期末付（默认），1 期初付。以前 PV 不收 fv 和 type、PMT/FV 不收 type，
+     多出来的参数被静默忽略，算出一个看起来正常但错的数。 */
+  function annuity(r, n, pmt, pv, fv, type) {
+    if (r === 0) return { pmt: -(pv + fv) / n, pv: -(fv + pmt * n), fv: -(pv + pmt * n) };
+    const g = Math.pow(1 + r, n), k = 1 + r * type;
+    return {
+      pmt: -(pv * g + fv) * r / (k * (g - 1)),
+      pv: -(fv + pmt * k * (g - 1) / r) / g,
+      fv: -(pv * g + pmt * k * (g - 1) / r)
+    };
+  }
+  /* 比较运算的 Excel 口径：都是数按数比；有文本按文本比（不区分大小写）；
+     数和文本混比时数永远小于文本。以前一律 num() 后比，"a"="b" 变成 0=0 → 真。 */
+  function isTextVal(x) { return typeof x === 'string' && x !== '' && isNaN(parseFloat(x)); }
+  function cmp(a, b) {
+    if (a && a.__range) a = num(a);
+    if (b && b.__range) b = num(b);
+    const ta = isTextVal(a), tb = isTextVal(b);
+    if (ta && tb) { const x = String(a).toLowerCase(), y = String(b).toLowerCase(); return x < y ? -1 : (x > y ? 1 : 0); }
+    if (ta) return 1;   // 文本 > 数
+    if (tb) return -1;
+    const x = num(a), y = num(b);
+    return x < y ? -1 : (x > y ? 1 : 0);
+  }
+  function argAt(a, i, dflt) { return a.length > i && a[i] !== undefined && a[i] !== '' ? num(a[i]) : dflt; }
+
   const FUNCS = {
     SUM: (a) => nums(a).reduce((x, y) => x + y, 0),
     PRODUCT: (a) => nums(a).reduce((x, y) => x * y, 1),
@@ -304,28 +383,33 @@
     LN: (a) => Math.log(num(a[0])),
     LOG: (a) => (a.length > 1 ? Math.log(num(a[0])) / Math.log(num(a[1])) : Math.log10(num(a[0]))),
     POWER: (a) => Math.pow(num(a[0]), num(a[1])),
-    ROUND: (a) => { const d = a.length > 1 ? num(a[1]) : 0; const f = Math.pow(10, d); return Math.round(num(a[0]) * f) / f; },
+    ROUND: (a) => roundHalfAway(num(a[0]), a.length > 1 ? num(a[1]) : 0),
     ROUNDUP: (a) => { const d = a.length > 1 ? num(a[1]) : 0; const f = Math.pow(10, d); const x = num(a[0]); return (x < 0 ? -1 : 1) * Math.ceil(Math.abs(x) * f) / f; },
     ROUNDDOWN: (a) => { const d = a.length > 1 ? num(a[1]) : 0; const f = Math.pow(10, d); const x = num(a[0]); return (x < 0 ? -1 : 1) * Math.floor(Math.abs(x) * f) / f; },
     INT: (a) => Math.floor(num(a[0])),
     IF: (a) => (num(a[0]) !== 0 ? a[1] : (a.length > 2 ? a[2] : 0)),
-    IFERROR: (a) => a[0],
+    IFERROR: (a) => a[0],   // 实际在 evaluate 里惰性处理；这里只是让函数名可被识别
     AND: (a) => (nums(a).every((x) => x !== 0) ? 1 : 0),
     OR: (a) => (nums(a).some((x) => x !== 0) ? 1 : 0),
     NOT: (a) => (num(a[0]) === 0 ? 1 : 0),
     SUMPRODUCT: (a) => {
       const cols = a.map((x) => (x && x.__range ? x.values.map(num) : [num(x)]));
-      const n = Math.max.apply(null, cols.map((c) => c.length));
+      const n = cols[0].length;
+      /* Excel 要求所有区域维度一致，否则 #VALUE!。以前长度不齐时拿首元素补位继续算，
+         结果看起来正常，其实是错的。 */
+      for (let j = 1; j < cols.length; j++) {
+        if (cols[j].length !== n) throw new Error('SUMPRODUCT：各区域大小必须一致（' + n + ' 对 ' + cols[j].length + '）');
+      }
       let s = 0;
-      for (let i = 0; i < n; i++) { let pr = 1; for (let j = 0; j < cols.length; j++) pr *= (cols[j][i] !== undefined ? cols[j][i] : cols[j][0]); s += pr; }
+      for (let i = 0; i < n; i++) { let pr = 1; for (let j = 0; j < cols.length; j++) pr *= cols[j][i]; s += pr; }
       return s;
     },
     NPV: (a) => npv(num(a[0]), nums(a.slice(1))),
     IRR: (a) => irr(nums([a[0]]), a.length > 1 ? num(a[1]) : undefined),
-    XIRR: (a) => irr(nums([a[0]])),
-    PMT: (a) => { const r = num(a[0]), n = num(a[1]), pv = num(a[2]); if (r === 0) return -pv / n; return -(pv * r) / (1 - Math.pow(1 + r, -n)); },
-    PV: (a) => { const r = num(a[0]), n = num(a[1]), pmt = num(a[2]); if (r === 0) return -pmt * n; return -pmt * (1 - Math.pow(1 + r, -n)) / r; },
-    FV: (a) => { const r = num(a[0]), n = num(a[1]), pmt = num(a[2]), pv = a.length > 3 ? num(a[3]) : 0; if (r === 0) return -(pv + pmt * n); return -(pv * Math.pow(1 + r, n) + pmt * (Math.pow(1 + r, n) - 1) / r); },
+    XIRR: (a) => xirr(nums([a[0]]), nums([a[1]]), a.length > 2 ? num(a[2]) : undefined),
+    PMT: (a) => annuity(num(a[0]), num(a[1]), 0, num(a[2]), argAt(a, 3, 0), argAt(a, 4, 0)).pmt,
+    PV: (a) => annuity(num(a[0]), num(a[1]), num(a[2]), 0, argAt(a, 3, 0), argAt(a, 4, 0)).pv,
+    FV: (a) => annuity(num(a[0]), num(a[1]), num(a[2]), argAt(a, 3, 0), 0, argAt(a, 4, 0)).fv,
     ISNUMBER: (a) => (typeof a[0] === 'number' && isFinite(a[0]) ? 1 : 0)
   };
 
@@ -341,7 +425,7 @@
           const sh = node.sheet || ctx.sheet;
           const c1 = Math.min(node.a.col, node.b.col), c2 = Math.max(node.a.col, node.b.col);
           const r1 = Math.min(node.a.row, node.b.row), r2 = Math.max(node.a.row, node.b.row);
-          if ((c2 - c1 + 1) * (r2 - r1 + 1) > 4000) throw new Error('区域太大');
+          if ((c2 - c1 + 1) * (r2 - r1 + 1) > MAX_RANGE_CELLS) throw new Error('区域太大（最多 ' + MAX_RANGE_CELLS + ' 格）');
           const vals = [];
           for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) vals.push(ctx.get(sh, c, r));
           return { __range: true, values: vals };
@@ -360,12 +444,12 @@
               return num(a) / d;
             }
             case '^': return Math.pow(num(a), num(b));
-            case '=': return (num(a) === num(b)) ? 1 : 0;
-            case '<>': return (num(a) !== num(b)) ? 1 : 0;
-            case '<': return num(a) < num(b) ? 1 : 0;
-            case '>': return num(a) > num(b) ? 1 : 0;
-            case '<=': return num(a) <= num(b) ? 1 : 0;
-            case '>=': return num(a) >= num(b) ? 1 : 0;
+            case '=': return cmp(a, b) === 0 ? 1 : 0;
+            case '<>': return cmp(a, b) !== 0 ? 1 : 0;
+            case '<': return cmp(a, b) < 0 ? 1 : 0;
+            case '>': return cmp(a, b) > 0 ? 1 : 0;
+            case '<=': return cmp(a, b) <= 0 ? 1 : 0;
+            case '>=': return cmp(a, b) >= 0 ? 1 : 0;
           }
           throw new Error('不支持的运算符 ' + op);
         }
@@ -382,7 +466,11 @@
           }
           const args = node.args.map(ev);
           const r = fn(args);
-          return (r && r.__range) ? num(r) : r;
+          const v = (r && r.__range) ? num(r) : r;
+          /* SQRT(-1)、LN(0) 这类结果是 NaN / ±Infinity，不抛错的话 IFERROR 接不住，
+             还会一路传成「看起来是个数」的东西。Excel 里它们是 #NUM!。 */
+          if (typeof v === 'number' && !isFinite(v)) throw new Error(node.name + '() 结果无效（#NUM!）');
+          return v;
         }
       }
       throw new Error('公式结构异常');
@@ -581,7 +669,36 @@
     };
   }
 
+  /* 输入分类：这一格的原始输入到底是公式、数字还是文本。
+     规则必须和 Workbook.get 完全一致——导出以前自己用「首字符是不是 =」加
+     parseFloat 另猜一套，于是 ＝B3-B6 导成了文本、100+23 导成了 100。
+     求值和导出共用这一个函数，就不可能再分叉。 */
+  const FUNC_ALIAS = { AVG: 'AVERAGE' };
+  function classifyInput(raw) {
+    let s = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (s[0] === '＝') s = '=' + s.slice(1);
+    if (s === '') return { kind: 'empty' };
+    if (s[0] === '=') return { kind: 'formula', src: s.slice(1) };
+    const cleaned = s.replace(/,/g, '');
+    if (/^-?\d*\.?\d+%$/.test(cleaned)) return { kind: 'number', value: parseFloat(cleaned) / 100 };
+    if (/^-?\d*\.?\d+([eE][+-]?\d+)?$/.test(cleaned)) return { kind: 'number', value: parseFloat(cleaned) };
+    /* 不带等号的表达式（100+23、B3-B6）引擎照样当公式算，导出也得当公式 */
+    return { kind: 'formula', src: s };
+  }
+  /* 把公式整理成 Excel 能直接认的样子：全角转半角、别名换正名。
+     引号内原样保留（表名里允许全角括号）。 */
+  function canonicalFormula(src) {
+    let s = normalizeFullwidth(String(src));
+    Object.keys(FUNC_ALIAS).forEach(function (k) {
+      s = s.replace(new RegExp('(^|[^A-Za-z0-9_])' + k + '\\s*\\(', 'gi'), '$1' + FUNC_ALIAS[k] + '(');
+    });
+    return s;
+  }
+
   global.FML = {
+    classifyInput: classifyInput,
+    canonicalFormula: canonicalFormula,
+    MAX_RANGE_CELLS: MAX_RANGE_CELLS,
     makeGetter: makeGetter,
     scanRefs: scanRefs,
     translate: translate,
@@ -608,7 +725,12 @@
               const b = toks[i + 2];
               const c1 = Math.min(t.col, b.col), c2 = Math.max(t.col, b.col);
               const r1 = Math.min(t.row, b.row), r2 = Math.max(t.row, b.row);
-              for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) out.push(sh + '!' + addr(c, r));
+              if ((c2 - c1 + 1) * (r2 - r1 + 1) > MAX_RANGE_CELLS) {
+                /* 超限只记两个角，不展开。真正求值时会报「区域太大」，这里不用重复 */
+                out.push(sh + '!' + addr(c1, r1)); out.push(sh + '!' + addr(c2, r2));
+              } else {
+                for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) out.push(sh + '!' + addr(c, r));
+              }
               i += 2;
             } else {
               out.push(sh + '!' + addr(t.col, t.row));

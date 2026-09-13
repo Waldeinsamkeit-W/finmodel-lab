@@ -233,19 +233,20 @@
           if (cell.kind === 'given') {
             x += '<c r="' + addr + '" s="' + (isTot ? styleFor(fmt, 1) : styleFor(fmt, 0)) + '"><v>' + cell.v + '</v></c>';
           } else if (cell.kind === 'calc') {
-            x += '<c r="' + addr + '" s="' + styleFor(fmt, isTot) + '"><f>' + esc(toExcelFormula(cell.f, nameMap)) + '</f></c>';
+            x += '<c r="' + addr + '" s="' + styleFor(fmt, isTot) + '"><f>' + esc(toExcelFormula('=' + FML.canonicalFormula(String(cell.f).replace(/^[=＝]/, '')), nameMap)) + '</f></c>';
           } else if (cell.kind === 'input') {
             let raw = inputs[sh.name + '!' + addr] || '';
             if (!raw && opts.withAnswers) raw = cell.sol;
             const st = raw ? styleFor(fmt, isTot) : 13;
-            if (!raw) { x += '<c r="' + addr + '" s="' + st + '"/>'; }
-            else if (String(raw)[0] === '=') {
-              x += '<c r="' + addr + '" s="' + st + '"><f>' + esc(toExcelFormula(raw, nameMap)) + '</f></c>';
-            } else {
-              const n = parseFloat(String(raw).replace(/,/g, '').replace('%', ''));
-              const v = /%\s*$/.test(String(raw)) ? n / 100 : n;
-              if (isFinite(v)) x += '<c r="' + addr + '" s="' + st + '"><v>' + v + '</v></c>';
-              else x += '<c r="' + addr + '" s="' + st + '" t="inlineStr"><is><t>' + esc(raw) + '</t></is></c>';
+            /* 类型判定交给引擎，和网页上算的那一套完全一致。
+               以前这里自己猜：＝B3-B6 因为首字符不是半角 = 被导成文本，
+               100+23 被 parseFloat 截成 100，全角括号原样写进公式，AVG 没换成 AVERAGE。 */
+            const c = FML.classifyInput(raw);
+            if (c.kind === 'empty') { x += '<c r="' + addr + '" s="' + st + '"/>'; }
+            else if (c.kind === 'number') { x += '<c r="' + addr + '" s="' + st + '"><v>' + c.value + '</v></c>'; }
+            else {
+              const fsrc = FML.canonicalFormula(c.src);
+              x += '<c r="' + addr + '" s="' + st + '"><f>' + esc(toExcelFormula('=' + fsrc, nameMap)) + '</f></c>';
             }
           }
         }

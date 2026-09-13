@@ -1502,22 +1502,34 @@
     }
   }
 
-  /* 提示逐级放出，每一级都记录。换一个格子时层级归零。 */
+  /* 提示逐级放出，每一级都记录。换一个格子时层级归零。
+     记录必须在内容真的显示之后：手机上侧栏默认收起，以前点一次提示什么都看不到，
+     但层级已经 +1 并扣掉了独立掌握资格——用户被扣了分却没得到任何东西。 */
   function showHint() {
     const info = S.actInfo;
     if (!info || info.kind !== 'input') { toast('先选中一个待填单元格'); return; }
     const sh = S.model.sheets[S.sheetIdx];
     const key = sh.name + '!' + info.addr;
     if (S.hintFor !== info.addr) { S.hintFor = info.addr; S.hintTier = 0; }
+    /* 先把侧栏打开并切到「提示与诊断」。侧栏收起时这一次点击只负责打开，
+       不升级、不记录——让用户先看到已有的内容，再决定要不要下一级。 */
+    const side = document.getElementById('labSide');
+    const wasCollapsed = side && side.classList.contains('collapsed');
+    if (wasCollapsed) side.classList.remove('collapsed');
+    S.tab = 'fb';
+    if (wasCollapsed && S.hintTier > 0) { renderSide(); return; }
     if (S.hintTier >= Hint.MAX) {
       toast('提示已经给到最后一级了。还是没头绪的话，从「···」里查看答案', 'warn', 5000);
-      S.tab = 'fb'; renderSide(); return;
+      renderSide(); return;
     }
     S.hintTier++;
-    Store.markHint(S.model.id, key, S.hintTier);
-    S.tab = 'fb';
     renderSide();
-    if (S.hintTier === Hint.MAX) toast('这是最后一级提示', 'warn');
+    /* 渲染完再确认这一级真的在页面上，确认了才记账 */
+    const shown = side && !side.classList.contains('collapsed') &&
+      document.querySelectorAll('.hint-tier').length >= S.hintTier;
+    if (shown) Store.markHint(S.model.id, key, S.hintTier);
+    else S.hintTier--;
+    if (shown && S.hintTier === Hint.MAX) toast('这是最后一级提示', 'warn');
   }
 
   function revealCurrent() {
