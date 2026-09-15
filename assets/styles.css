@@ -415,6 +415,7 @@ button { font-family: inherit; font-size: inherit; cursor: pointer; }
 .callout { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 11px 14px; border-radius: 0 8px 8px 0; font-size: 13px; color: var(--ink-2); margin: 12px 0; }
 .callout.info { border-color: var(--accent); background: var(--accent-soft); }
 .callout.risk { border-color: var(--err); background: var(--err-soft); }
+.callout.ok { border-color: var(--ok); background: var(--ok-soft); }
 .callout b { color: var(--ink); }
 
 /* ------------------------------------------------------------------ 建模页 */
@@ -840,3 +841,36 @@ kbd {
 }
 .prov-ok { color: var(--ok); background: var(--ok-soft); }
 .prov-un { color: var(--warn); background: var(--warn-soft); }
+
+/* ------------------------------------------------------ 键盘可达
+   卡片、列表行是 div，靠 bindCards 补上 tabindex；这里给它们和工作表 Tab 一个
+   看得见的焦点环。只在 :focus-visible 出现，鼠标点不会闪。 */
+[data-goto] { cursor: pointer; }
+[data-goto]:focus-visible, .tabs button:focus-visible, .issue-row:focus-visible, .side-tabs button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px;
+}
+
+/* ------------------------------------------------------ 检查后的错误总览 */
+.issue-box summary {
+  list-style: none; cursor: pointer; display: flex; flex-direction: column; gap: 3px;
+  padding-right: 18px; position: relative;
+}
+.issue-box summary::-webkit-details-marker { display: none; }
+.issue-box summary::after {
+  content: "›"; position: absolute; right: 4px; top: 0; font-size: 16px; color: var(--ink-3);
+  transform: rotate(90deg); transition: transform .12s;
+}
+.issue-box:not([open]) summary::after { transform: rotate(0deg); }
+.issue-list { margin-top: 8px; display: flex; flex-direction: column; }
+.issue-sheet { font-size: 11px; color: var(--ink-3); font-weight: 600; margin: 8px 0 3px; letter-spacing: .02em; }
+.issue-sheet:first-child { margin-top: 0; }
+.issue-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 5px 6px; border: none; background: none; border-radius: 6px; font: inherit; font-size: 12.5px;
+  color: var(--ink); cursor: pointer;
+}
+.issue-row:hover { background: var(--surface-2); }
+.issue-row .num { font-family: var(--mono); font-size: 11.5px; color: var(--accent); min-width: 34px; }
+.issue-row .issue-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.issue-row .issue-code { font-size: 10.5px; color: var(--err); background: var(--err-soft); border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+.issue-row .issue-code.blank { color: var(--ink-3); background: var(--surface-2); }

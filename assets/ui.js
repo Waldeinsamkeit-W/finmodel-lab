@@ -18,6 +18,9 @@
   const esc = (s) => String(s === undefined || s === null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const el = (html) => { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; };
+  /* 说明性文字只支持一种标记：**粗体**。先转义再换标签，所以数据里写不进 HTML。
+     intro / steps / takeaways / dataNote / objectives 都走它，别再各自 esc()。 */
+  const rich = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
 
   function toast(msg, kind, ms) {
     $toast.textContent = msg;
@@ -105,7 +108,7 @@
   const S = {
     filterMarket: 'all', filterLevel: 'all', filterIndustry: 'all', q: '',
     model: null, sheetIdx: 0, actInfo: null, inputs: {}, wb: null, sol: null, grader: null,
-    showChecks: false, hintFor: null, hintTier: 0, tab: 'task', startTs: 0
+    showChecks: false, hintFor: null, hintTier: 0, tab: 'task', startTs: 0, issuesOpen: true
   };
 
   /* =========================================================================
@@ -411,7 +414,16 @@
   function bindCards(root) {
     const scopeEl = root || $app;
     Array.prototype.forEach.call(scopeEl.querySelectorAll('[data-goto]'), function (n) {
+      /* 卡片和列表行是 div，不在 Tab 序列里，键盘用户到不了。补成「像链接的东西」：
+         可聚焦、读屏念成链接、回车和空格都能进。 */
+      if (!n.hasAttribute('tabindex')) n.setAttribute('tabindex', '0');
+      if (!n.hasAttribute('role')) n.setAttribute('role', 'link');
       n.onclick = function (e) { if (e.target.tagName === 'A') return; go(n.getAttribute('data-goto')); };
+      n.onkeydown = function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        if (e.target !== n) return;
+        e.preventDefault(); go(n.getAttribute('data-goto'));
+      };
     });
     /* 轨道切换：换掉 DB.path 再重渲染即可，进度是按模型 id 存的，不受影响 */
     Array.prototype.forEach.call(scopeEl.querySelectorAll('[data-track]'), function (n) {
@@ -508,7 +520,7 @@
           return '<div class="trk-pick-home">' +
             '<div class="tph-h"><div class="pc-k">先选一条路线</div>' +
             '<div class="pc-t">你现在是什么水平？</div>' +
-            '<div class="pc-d">69 个训练不必都做。选一条最贴近你的，剩下的随时能换。</div></div>' +
+            '<div class="pc-d">' + DB.models.length + ' 个训练不必都做。选一条最贴近你的，剩下的随时能换。</div></div>' +
             '<div class="tph-cards">' + DB.tracks.map(function (tk) {
               const n = []; tk.stages.forEach(function (sg) { sg.steps.forEach(function (x) { n.push(x.id); }); });
               const hh = n.reduce(function (a, id) { const mm = byId(DB.models, id); return a + (mm ? mm.minutes : 0); }, 0);
@@ -572,12 +584,12 @@
               '<span class="chip ' + LEVELS[l].cls + '" style="width:52px;justify-content:center">' + LEVELS[l].name + '</span>' +
               '<div class="bar" style="flex:1"><i style="width:' + Math.round(byLevel[i] / DB.models.length * 100) + '%"></i></div>' +
               '<span class="num" style="font-size:12px;color:var(--ink-3)">' + byLevel[i] + '</span></div>').join('') +
-            '<div class="footnote" style="margin-top:10px">简单 = 单表、20–35 格；中级 = 单表多模块或含预测；复杂 = 多表联动、含配平与敏感性。</div>' +
+            '<div class="footnote" style="margin-top:10px">难度看概念和结构，不看格数：简单 = 单表、一个概念；中级 = 单表多模块或含预测；复杂 = 多表联动、含配平与敏感性。工作量看卡片上的格数——简单题也可能有五六十格。</div>' +
           '</div>' +
           '<div class="card pad">' +
             '<h3 style="margin-top:0">行业档案</h3>' +
             DB.industries.map((i) =>
-              '<div class="list-row" style="cursor:pointer;padding-left:0;padding-right:0" onclick="location.hash=\'#/industry/' + i.id + '\'">' +
+              '<div class="list-row" style="padding-left:0;padding-right:0" data-goto="#/industry/' + i.id + '">' +
               '<span class="logo-dot" style="background:' + i.color + '">' + esc(i.name.slice(0, 1)) + '</span>' +
               '<div class="lr-main"><div>' + esc(i.name) + '</div><div class="lr-sub">' + esc(i.tagline) + '</div></div>' +
               '</div>').join('') +
@@ -939,7 +951,7 @@
           '</div>' +
           '<div class="card" style="margin-bottom:14px">' +
             '<div class="pad" style="padding-bottom:6px"><h3 style="margin:0">本行业公司（' + cos.length + '）</h3></div>' +
-            cos.map((c) => '<div class="list-row" style="cursor:pointer" onclick="location.hash=\'#/company/' + c.id + '\'">' +
+            cos.map((c) => '<div class="list-row" data-goto="#/company/' + c.id + '">' +
               '<span class="logo-dot" style="background:' + esc(c.color) + '">' + esc(c.short) + '</span>' +
               '<div class="lr-main"><div>' + esc(c.name) + ' <span class="lr-sub">' + esc(c.ticker) + '</span></div>' +
               '<div class="lr-sub">' + esc(c.tagline) + '</div></div>' +
@@ -1001,7 +1013,7 @@
           '</div>' +
           '<div class="card">' +
             '<div class="pad" style="padding-bottom:6px"><h3 style="margin:0">相关模型</h3></div>' +
-            (ms.length ? ms.map((m) => '<div class="list-row" style="cursor:pointer" onclick="location.hash=\'#/model/' + m.id + '\'">' +
+            (ms.length ? ms.map((m) => '<div class="list-row" data-goto="#/model/' + m.id + '">' +
               '<span class="chip ' + LEVELS[m.level].cls + '">' + LEVELS[m.level].name + '</span>' +
               '<div class="lr-main"><div>' + esc(m.title) + '</div><div class="lr-sub">' + m.minutes + ' 分钟 · ' + countInputs(m) + ' 个待填单元格</div></div>' +
               '</div>').join('') : '<div class="pad footnote">暂无</div>') +
@@ -1076,7 +1088,7 @@
       (rows.length ? '<div class="card">' + rows.map((x) => {
         const total = countInputs(x.m);
         const pct = total ? Math.round((x.rec.correct || 0) / total * 100) : 0;
-        return '<div class="list-row" style="cursor:pointer" onclick="location.hash=\'#/model/' + x.m.id + '\'">' +
+        return '<div class="list-row" data-goto="#/model/' + x.m.id + '">' +
           '<span class="chip ' + LEVELS[x.m.level].cls + '">' + LEVELS[x.m.level].name + '</span>' +
           '<div class="lr-main"><div>' + esc(x.m.title) + '</div>' +
           '<div class="lr-sub">最后修改 ' + fullTime(x.ts) + ' · ' + timeAgo(x.ts) +
@@ -1120,12 +1132,17 @@
       '</ul>' +
       '<h3>支持的函数</h3>' +
       '<p class="footnote">SUM、AVERAGE、MEDIAN、MIN、MAX、COUNT、PRODUCT、ABS、ROUND、ROUNDUP、ROUNDDOWN、INT、SQRT、POWER、EXP、LN、LOG、' +
-      'IF、IFERROR、AND、OR、NOT、SUMPRODUCT、NPV、IRR、PMT、PV、FV、SIGN、ISNUMBER</p>' +
+      'IF、IFERROR、AND、OR、NOT、SUMPRODUCT、NPV、IRR、XIRR、PMT、PV、FV、SIGN、ISNUMBER</p>' +
       '<h3>检查与提示</h3>' +
       '<ul>' +
-      '<li><b>检查本表</b> / <b>检查全部</b>：把答对的标绿、答错的标红。数值容差 0.2%，所以四舍五入的小差异不会判错。</li>' +
-      '<li><b>提示</b>：显示当前单元格该怎么想。</li>' +
-      '<li><b>显示参考公式</b>：直接把参考答案填进当前格。用过之后这一格会被记为"已看答案"。</li>' +
+      '<li><b>检查全部</b>：答对的标绿、答错的标红。判定分三步：结果对不对、是不是算出来的（写死的数字不算）、' +
+      '换一组数据还对不对。所以<b>把参考答案的数值抄进去是过不了的</b>，必须写公式。</li>' +
+      '<li><b>下一个错误</b>：检查之后出现在「检查全部」旁边，按一下跳到下一个答错或空白的格子，跨表也能跳。' +
+      '侧栏「提示与诊断」顶部同时列出所有待处理的格子，点一行也能跳过去。</li>' +
+      '<li><b>提示</b>：分三级，每按一次多给一级——先说这一格属于哪一步，再说要引用哪几行，最后给公式骨架。' +
+      '用过提示的格子会记下来，影响「独立掌握」这个指标，但不影响完成度。</li>' +
+      '<li><b>查看答案</b>（在 <b>···</b> 菜单里）：把参考公式直接填进当前格。这一格会被记为「已看答案」。</li>' +
+      '<li>把鼠标停在灰色的只读格上，会显示它是<b>历史数据</b>、<b>预测假设</b>还是<b>教学假设</b>，以及这一行的备注。</li>' +
       '</ul>' +
       '<h3>进度保存</h3>' +
       '<p>每改一格就自动保存到浏览器本地，包含最后修改时间和你停在哪个单元格。' +
@@ -1194,6 +1211,7 @@
             '</div>' +
           '</div>' +
           '<button class="btn primary sm" id="btnCheck">检查全部</button>' +
+          '<button class="btn sm" id="btnNext" hidden title="跳到下一个答错或空白的格子">下一个错误</button>' +
         '</div>' +
         /* 手机端明确定位成学习/复习，而不是假装能在 390px 上建模。
            公式栏、跨列比较、键盘导航在手机上都不成立，与其硬塞不如说清楚。 */
@@ -1218,6 +1236,7 @@
       if (history.length > 1) history.back(); else location.hash = '#/browse/all';
     };
     document.getElementById('btnCheck').onclick = function () { checkAll(); };
+    document.getElementById('btnNext').onclick = function () { jumpToIssue(); };
     document.getElementById('btnReset').onclick = function () {
       closeMore();
       if (!confirm('重置本模型？作答、提示和尝试记录都会清零，相当于重新练一遍。\n重置前会自动存一个还原点，可以从「···」里恢复。')) return;
@@ -1329,17 +1348,35 @@
     const m = S.model;
     const t = document.getElementById('tabs');
     const ed = Grid.isEditing && Grid.isEditing() ? Grid.editInfo() : null;
+    t.setAttribute('role', 'tablist');
     t.innerHTML = m.sheets.map(function (s, i) {
       const isEdit = ed && ed.sheetIdx === i;
-      return '<button' + (i === S.sheetIdx ? ' class="on"' : (isEdit ? ' class="editing-src"' : '')) + ' data-i="' + i + '">' +
+      const on = i === S.sheetIdx;
+      return '<button role="tab" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '"' +
+        (on ? ' class="on"' : (isEdit ? ' class="editing-src"' : '')) + ' data-i="' + i + '">' +
         '<span class="tb-n">' + String(i + 1).padStart(2, '0') + '</span>' + esc(s.name) +
         (isEdit && i !== S.sheetIdx ? '<span class="tb-dot" title="正在这张表上编辑公式">●</span>' : '') + '</button>';
     }).join('');
-    Array.prototype.forEach.call(t.querySelectorAll('button'), function (b) {
-      /* 用 mousedown 并阻止默认行为，避免正在编辑的输入框先失焦 */
+    const btns = t.querySelectorAll('button');
+    Array.prototype.forEach.call(btns, function (b, i) {
+      /* 鼠标用 mousedown 并阻止默认行为，避免正在编辑的输入框先失焦。
+         键盘（回车/空格）走 click；switchSheet 对同一张表是空操作，两者不会重复切。 */
       b.addEventListener('mousedown', function (e) {
         e.preventDefault();
         switchSheet(+b.getAttribute('data-i'));
+      });
+      b.addEventListener('click', function () { switchSheet(+b.getAttribute('data-i')); });
+      b.addEventListener('keydown', function (e) {
+        let j = -1;
+        if (e.key === 'ArrowRight') j = (i + 1) % btns.length;
+        else if (e.key === 'ArrowLeft') j = (i - 1 + btns.length) % btns.length;
+        else if (e.key === 'Home') j = 0;
+        else if (e.key === 'End') j = btns.length - 1;
+        if (j < 0) return;
+        e.preventDefault();
+        switchSheet(j);
+        const nb = document.querySelector('#tabs button[data-i="' + j + '"]');
+        if (nb) nb.focus();
       });
     });
   }
@@ -1412,7 +1449,7 @@
       fx.placeholder = '写公式，例如 =B3-B6；引用其他表用 =\'假设\'!B3';
     } else {
       fx.disabled = true;
-      fx.value = info.kind === 'given' ? '真实数据（只读）' : info.kind === 'calc' ? info.raw + '   （模型自带的计算格，只读）' : '';
+      fx.value = info.kind === 'given' ? Grid.givenLabel(info.col, info.row) : info.kind === 'calc' ? info.raw + '   （模型自带的计算格，只读）' : '';
     }
   }
 
@@ -1487,10 +1524,92 @@
   function checkAll() {
     commitPending();
     S.showChecks = true;
+    S.tab = 'fb';
+    S.issuesOpen = true;
     const s = updateProgress();
     Grid.refresh(); renderSide();
     if (s.correct === s.total) toast('全部正确，' + s.total + ' / ' + s.total + ' 🎉', 'ok');
-    else toast('答对 ' + s.correct + ' / ' + s.total + '，点红色格子看诊断', s.correct ? '' : 'err');
+    else toast('答对 ' + s.correct + ' / ' + s.total + '，按「下一个错误」逐格过', s.correct ? '' : 'err');
+  }
+
+  /* ------------------------------------------------------------ 错误清单与跳转
+     检查之后，用户以前只能在表里找红格子——大表几百格、跨三四张表，找不过来。
+     清单按 表 → 行 → 列 排序，「下一个」从当前格往后找，到底了绕回第一个。 */
+  const ISSUE_NAME = { blank: '空白', value: '结果不对', err: '算不出来', const: '写死常数', nonequiv: '公式不等价', solerr: '参考答案异常' };
+  function issueList() {
+    const out = [];
+    S.model.sheets.forEach(function (sh, si) {
+      sh.rows.forEach(function (r, ri) {
+        const rowNum = ri + 2;
+        (r.cells || []).forEach(function (cell, ci) {
+          if (!cell || cell.kind !== 'input') return;
+          const v = S.grader.of(sh.name, ci + 1, rowNum);
+          if (v.ok) return;
+          out.push({ si: si, sheet: sh.name, col: ci + 1, row: rowNum, addr: FML.addr(ci + 1, rowNum), code: v.code, label: r.label || '' });
+        });
+      });
+    });
+    return out;
+  }
+
+  function gotoCell(x) {
+    if (Grid.isEditing && Grid.isEditing()) Grid.commitEdit();
+    if (x.si !== S.sheetIdx) switchSheet(x.si);
+    Grid.select(x.col, x.row);
+  }
+
+  function jumpToIssue() {
+    const list = issueList();
+    if (!list.length) { toast('没有要改的格子了 🎉', 'ok'); paintNextBtn(); return; }
+    const a = S.actInfo || {};
+    const cs = S.sheetIdx, cr = a.row || 0, cc = a.col || 0;
+    let idx = -1;
+    for (let i = 0; i < list.length; i++) {
+      const x = list[i];
+      if (x.si > cs || (x.si === cs && (x.row > cr || (x.row === cr && x.col > cc)))) { idx = i; break; }
+    }
+    const wrapped = idx < 0;
+    if (wrapped) idx = 0;
+    gotoCell(list[idx]);
+    toast((wrapped && list.length > 1 ? '已到最后，回到第一个：' : '') + list[idx].sheet + '!' + list[idx].addr +
+      ' · ' + (ISSUE_NAME[list[idx].code] || '') + '（' + (idx + 1) + '/' + list.length + '）');
+  }
+
+  function paintNextBtn() {
+    const b = document.getElementById('btnNext');
+    if (!b) return;
+    if (!S.showChecks) { b.hidden = true; return; }
+    const n = issueList().length;
+    b.hidden = n === 0;
+    b.textContent = '下一个错误 (' + n + ')';
+  }
+
+  /* 错误总览：放在「提示与诊断」顶部，按表分组，点一行就跳过去 */
+  function issuesHTML() {
+    if (!S.showChecks) return '';
+    const list = issueList();
+    if (!list.length) return '<div class="side-sec"><div class="callout ok" style="font-size:12.5px">全部正确。可以从「···」里导出 Excel 留档。</div></div>';
+    const byCode = {};
+    list.forEach(function (x) { byCode[x.code] = (byCode[x.code] || 0) + 1; });
+    const sum = Object.keys(byCode).map(function (k) { return (ISSUE_NAME[k] || k) + ' ' + byCode[k]; }).join(' · ');
+    const MAX = 40;
+    /* 用 <details>：总览放最上面，但选中某一格看诊断时它不该占满侧栏。折叠状态记在 S 里，
+       重渲染不会把它弹回来。 */
+    let html = '<div class="side-sec"><details class="issue-box" id="issueBox"' + (S.issuesOpen ? ' open' : '') + '>' +
+      '<summary><span class="st" style="margin:0">待处理 ' + list.length + ' 格</span>' +
+      '<span class="footnote">' + esc(sum) + '</span></summary><div class="issue-list">';
+    let lastSheet = null;
+    list.slice(0, MAX).forEach(function (x, i) {
+      if (S.model.sheets.length > 1 && x.sheet !== lastSheet) {
+        html += '<div class="issue-sheet">' + esc(x.sheet) + '</div>'; lastSheet = x.sheet;
+      }
+      html += '<button class="issue-row" data-issue="' + i + '">' +
+        '<span class="num">' + esc(x.addr) + '</span>' +
+        '<span class="issue-label">' + esc(x.label) + '</span>' +
+        '<span class="issue-code ' + (x.code === 'blank' ? 'blank' : '') + '">' + esc(ISSUE_NAME[x.code] || x.code) + '</span></button>';
+    });
+    if (list.length > MAX) html += '<div class="footnote" style="margin-top:6px">还有 ' + (list.length - MAX) + ' 格，改完上面的再检查一次</div>';
+    return html + '</div></details></div>';
   }
 
   function closeMore() {
@@ -1699,24 +1818,25 @@
 
     const paneTask = progHTML + pathHTML +
       '<div class="side-sec"><div class="st">操作步骤</div>' +
-        m.steps.map((x, i) => '<div class="step"><div class="n">' + (i + 1) + '</div><div><b>' + esc(x.t) + '</b><br>' + esc(x.d) + '</div></div>').join('') +
+        m.steps.map((x, i) => '<div class="step"><div class="n">' + (i + 1) + '</div><div><b>' + esc(x.t) + '</b><br>' + rich(x.d) + '</div></div>').join('') +
       '</div>';
 
-    const paneFb = hintHTML + diagHTML +
-      (diagHTML || hintHTML ? '' : '<div class="side-sec"><div class="footnote">选中一个待填单元格，这里会显示提示；点「检查全部」之后，答错的格子会显示诊断。</div></div>');
+    const issueHTML = issuesHTML();
+    const paneFb = issueHTML + hintHTML + diagHTML +
+      (diagHTML || hintHTML || issueHTML ? '' : '<div class="side-sec"><div class="footnote">选中一个待填单元格，这里会显示提示；点「检查全部」之后，答错的格子会显示诊断。</div></div>');
 
     const paneDoc =
       '<div class="side-sec"><div class="st">这个模型在干什么</div>' +
-        m.intro.split('\n\n').map((p) => '<p style="font-size:13px;color:var(--ink-2)">' + esc(p).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>') + '</p>').join('') +
+        m.intro.split('\n\n').map((p) => '<p style="font-size:13px;color:var(--ink-2)">' + rich(p) + '</p>').join('') +
       '</div>' +
       '<div class="side-sec"><div class="st">学习目标</div><ul style="padding-left:18px;margin:0;font-size:13px;color:var(--ink-2)">' +
-        m.objectives.map((o) => '<li style="margin-bottom:5px">' + esc(o) + '</li>').join('') + '</ul></div>' +
+        m.objectives.map((o) => '<li style="margin-bottom:5px">' + rich(o) + '</li>').join('') + '</ul></div>' +
       '<div class="side-sec"><div class="st">做完之后应该看懂什么</div>' +
-        m.takeaways.map((t) => '<div class="callout info" style="font-size:12.5px">' + esc(t) + '</div>').join('') +
+        m.takeaways.map((t) => '<div class="callout info" style="font-size:12.5px">' + rich(t) + '</div>').join('') +
       '</div>' +
       '<div class="side-sec"><div class="st">数据说明</div>' +
         provHTML(m) +
-        '<div class="footnote">' + esc(m.dataNote) + '</div></div>' +
+        '<div class="footnote">' + rich(m.dataNote) + '</div></div>' +
       (m.companyId ? '<div class="side-sec"><a class="btn" style="width:100%;justify-content:center" href="#/company/' + m.companyId + '">查看公司案例背景与财报分析 →</a></div>' : '');
 
     side.innerHTML = tabBar + '<div class="side-pane">' +
@@ -1725,6 +1845,15 @@
     Array.prototype.forEach.call(side.querySelectorAll('[data-tab]'), function (b) {
       b.onclick = function () { S.tab = b.getAttribute('data-tab'); renderSide(); };
     });
+    if (S.tab === 'fb' && S.showChecks) {
+      const list = issueList();
+      Array.prototype.forEach.call(side.querySelectorAll('[data-issue]'), function (b) {
+        b.onclick = function () { const x = list[+b.getAttribute('data-issue')]; if (x) gotoCell(x); };
+      });
+      const box = document.getElementById('issueBox');
+      if (box) box.addEventListener('toggle', function () { S.issuesOpen = box.open; });
+    }
+    paintNextBtn();
   }
 
   /* 数据口径条。币种、量级、财年口径全部从 sheet.unit 和表头推出来，

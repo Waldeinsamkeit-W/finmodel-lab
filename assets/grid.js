@@ -178,6 +178,20 @@
     });
   }
 
+  /* 给定格以前一律标「真实数据」，但 27 个模型整体是构造数据，真实模型里的预测列
+     和折现率之类也是教学假设。标签按三层判断：整个模型是否构造 → 这一行的 note
+     是否说了假设 → 这一列是不是预测年（表头带 E）。剩下的才叫历史数据。 */
+  const RE_ASSUME_NOTE = /假设|示例|教学输入|约数|可改/;
+  const RE_FORECAST_HDR = /\d{4}\s*E\b|E$|预测|情景/;
+  function givenTitle(sh, r, c) {
+    const note = r.note ? '\n' + r.note : '';
+    const syn = window.Prov && Prov.isSynthetic && Prov.isSynthetic(ctx.model);
+    if (syn) return '教学假设（只读）：本模型数据为构造，不对应真实公司' + note;
+    if (r.note && RE_ASSUME_NOTE.test(r.note)) return '教学假设（只读）' + note;
+    if (RE_FORECAST_HDR.test(String(sh.header[c] || ''))) return '预测假设（只读）：教学设定，不是公司披露' + note;
+    return '历史数据（只读）：来自公司披露，出处见「案例资料 › 数据说明」' + note;
+  }
+
   /* ============================================================== 求值显示 */
   Grid.refresh = function () {
     const sh = sheet();
@@ -220,7 +234,7 @@
         } else {
           const res = wb.tryGet(sh.name, c, rowNum);
           if (!res.ok) { disp.textContent = '#ERR'; td.classList.add('err'); td.title = res.err; }
-          else { disp.textContent = ctx.fmtVal(res.v, fmt); td.title = cd.kind === 'calc' ? cd.f : '真实数据（只读）'; }
+          else { disp.textContent = ctx.fmtVal(res.v, fmt); td.title = cd.kind === 'calc' ? cd.f : givenTitle(sh, r, c); }
         }
       }
     });
@@ -724,6 +738,19 @@
     if (back !== ctx.sheetIdx) ctx.onSheetChange(back); else focusProxy();
   };
   Grid.beginEditActive = function (initial) { return beginEdit(active.col, active.row, initial); };
+  /* 公式栏对只读格显示同一套标签，别再各写一份 */
+  Grid.givenLabel = function (c, r) {
+    const rr = rowOf(r);
+    return rr ? givenTitle(sheet(), rr, c).split('\n')[0] : '只读';
+  };
+  /* 选中并滚到某一格（同一张表内）；跳错误格时用 */
+  Grid.select = function (c, r) {
+    if (edit) return false;
+    setSel(c, r, c, r);
+    scrollIntoView(c, r);
+    focusProxy();
+    return true;
+  };
   Grid.setActiveValue = function (v) {
     if (!isInput(active.col, active.row)) { flash('这一格不能改'); return false; }
     ctx.onChange(sheet().name, active.col, active.row, v);
