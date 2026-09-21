@@ -1,5 +1,7 @@
 # FinModel Lab · 财务模型实训平台
 
+**在线版：<https://waldeinsamkeit-w.github.io/finmodel-lab/>**（GitHub Pages，推送 `main` 后约一分钟自动更新）
+
 一个可以直接打开就用的财务建模练习网站。用真实财报数据搭模型，每一个空格都要自己写公式——
 可以引用其他单元格、跨表引用、做加减乘除，和 Excel 一样。
 
