@@ -2,6 +2,8 @@
 
 **在线版：<https://waldeinsamkeit-w.github.io/finmodel-lab/>**（GitHub Pages，推送 `main` 后约一分钟自动更新）
 
+![苹果利润表模型：填公式、检查全部、跳到下一个错误](screenshots/model.png)
+
 一个可以直接打开就用的财务建模练习网站。用真实财报数据搭模型，每一个空格都要自己写公式——
 可以引用其他单元格、跨表引用、做加减乘除，和 Excel 一样。
 
@@ -242,3 +244,8 @@ dumpModel('byd-3s')  // 打印某个模型的全部参考答案数值，用来�
 - 代码：[MIT](LICENSE)
 - 教学内容（`data/` 下的模型设计、步骤、提示、结论、案例背景）：[CC BY-NC 4.0](LICENSE-CONTENT.md)——可转载改编、须署名、不得商用
 - 财务数据整理自公司公开披露文件，出处见各模型「数据说明」；本站不构成任何投资建议
+
+## 反馈
+
+发现数据抄错、公式判错、文字过时，去 [Issues](https://github.com/Waldeinsamkeit-W/finmodel-lab/issues) 提，
+写清楚是哪个模型的哪一格。会改的欢迎直接改了提 Pull Request。

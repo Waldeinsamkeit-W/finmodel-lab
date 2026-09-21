@@ -428,7 +428,8 @@ button { font-family: inherit; font-size: inherit; cursor: pointer; }
 .callout b { color: var(--ink); }
 
 /* ------------------------------------------------------------------ 建模页 */
-.lab { display: flex; flex-direction: column; height: 100vh; }
+/* .lab 是 #app（flex 容器）的直接子元素，不写 flex:1 就按内容宽度收缩——宽屏右侧留一大块白 */
+.lab { display: flex; flex-direction: column; height: 100vh; flex: 1; min-width: 0; }
 .lab-head {
   display: flex; align-items: center; gap: 12px; padding: 10px 18px;
   background: var(--surface); border-bottom: 1px solid var(--border); flex: 0 0 auto;
@@ -883,6 +884,16 @@ kbd {
 .issue-row .issue-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .issue-row .issue-code { font-size: 10.5px; color: var(--err); background: var(--err-soft); border-radius: 4px; padding: 0 5px; white-space: nowrap; }
 .issue-row .issue-code.blank { color: var(--ink-3); background: var(--surface-2); }
+
+/* ------------------------------------------------------ 副本提示（不在正式域名上时） */
+.mirror-note {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  font-size: 13px; color: var(--ink-2); background: var(--accent-soft);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); padding: 9px 14px; margin-bottom: 18px;
+}
+.mirror-note a { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.mirror-note span { color: var(--ink-3); }
 </style>
 <div id="app"><div class="empty"><div class="big">📊</div>正在加载模型库…</div></div>
 <div class="toast" id="toast"></div>
@@ -904,7 +915,13 @@ kbd {
  * ==========================================================================*/
 window.FML_CONFIG = {
   SUPABASE_URL: '',
-  SUPABASE_ANON_KEY: ''
+  SUPABASE_ANON_KEY: '',
+
+  /* 正式地址和源码仓库。
+     使用说明页会显示这两个链接；在别处打开（claude.ai 制品、单文件版、别人镜像）时，
+     首页顶部会提示正式地址。清空就都不显示。 */
+  SITE_URL: 'https://waldeinsamkeit-w.github.io/finmodel-lab/',
+  REPO_URL: 'https://github.com/Waldeinsamkeit-W/finmodel-lab'
 };
 </script>
 <script>
@@ -16307,6 +16324,19 @@ window.FML_CONFIG = {
   const esc = (s) => String(s === undefined || s === null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const el = (html) => { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; };
+  /* 正式地址：不在正式域名上（制品、单文件、镜像）就提示一句。本地开发不提示。 */
+  const CFG = window.FML_CONFIG || {};
+  function onOfficialHost() {
+    if (!CFG.SITE_URL) return true;
+    try { return location.host === new URL(CFG.SITE_URL).host; } catch (e) { return true; }
+  }
+  function mirrorNoteHTML() {
+    if (onOfficialHost() || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return '';
+    return '<div class="mirror-note">这是 FinModel Lab 的副本。正式地址：' +
+      '<a href="' + esc(CFG.SITE_URL) + '" target="_blank" rel="noopener">' + esc(CFG.SITE_URL) + '</a>' +
+      '<span>——能导出 Excel、进度可备份、地址长期不变</span></div>';
+  }
+
   /* 说明性文字只支持一种标记：**粗体**。先转义再换标签，所以数据里写不进 HTML。
      intro / steps / takeaways / dataNote / objectives 都走它，别再各自 esc()。 */
   const rich = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
@@ -16788,7 +16818,8 @@ window.FML_CONFIG = {
     const byLevel = [1, 2, 3].map((l) => DB.models.filter((m) => m.level === l).length);
     const feat = DB.models.filter((m) => ['aapl-income', 'vc-captable', 'tcent-seg', 'msft-atvi', 'byd-3s', 'belle-lbo-full'].indexOf(m.id) >= 0);
 
-    return '<div class="page-head">' +
+    return mirrorNoteHTML() +
+      '<div class="page-head">' +
         '<div class="eyebrow">FINMODEL LAB</div>' +
         '<h1>财务模型实训平台</h1>' +
         '<div class="sub">用真实财报数据搭模型。每一个空格都要你自己写公式——可以引用其他单元格、跨表引用、做加减乘除。' +
@@ -17446,6 +17477,12 @@ window.FML_CONFIG = {
       '而不是整理好的摘要。中间有一张「勾稽桥」，带你验证三表之间必须对上的线' +
       '（净利润、资产=负债+权益、现金变动），并解释那些注定对不上的差额是什么。' +
       '走完这一步，才轮到搭预测模型。在<a href="#/courses">训练课程</a>里可以按模型类型找到它们。</p>' +
+      (CFG.SITE_URL || CFG.REPO_URL ? '<h3>地址与反馈</h3><ul>' +
+        (CFG.SITE_URL ? '<li><b>正式地址</b>：<a href="' + esc(CFG.SITE_URL) + '">' + esc(CFG.SITE_URL) + '</a>。分享给别人用这个，能导出 Excel、地址长期不变。</li>' : '') +
+        (CFG.REPO_URL ? '<li><b>源码</b>：<a href="' + esc(CFG.REPO_URL) + '" target="_blank" rel="noopener">' + esc(CFG.REPO_URL) + '</a>，代码 MIT、教学内容 CC BY-NC 4.0。</li>' +
+          '<li><b>发现错误或有建议</b>：去 <a href="' + esc(CFG.REPO_URL.replace(/\/$/, '')) + '/issues" target="_blank" rel="noopener">GitHub Issues</a> 提。' +
+          '数据抄错、公式判错、文字过时都算，写清楚是哪个模型的哪一格就行。会改的也欢迎直接改了提 Pull Request。</li>' : '') +
+        '</ul>' : '') +
       '<h3 style="color:var(--err)">重要声明</h3>' +
       '<p class="footnote">本平台所有历史财务数据均整理自公司公开披露的年度报告、Form 10-K 及交易公告，来源已在每个模型的"数据说明"中标注。' +
       '凡预测、假设、未公开披露的交易参数，均在表内明确标注为"教学假设"。' +

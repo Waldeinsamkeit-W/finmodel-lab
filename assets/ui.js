@@ -18,6 +18,19 @@
   const esc = (s) => String(s === undefined || s === null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const el = (html) => { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; };
+  /* 正式地址：不在正式域名上（制品、单文件、镜像）就提示一句。本地开发不提示。 */
+  const CFG = window.FML_CONFIG || {};
+  function onOfficialHost() {
+    if (!CFG.SITE_URL) return true;
+    try { return location.host === new URL(CFG.SITE_URL).host; } catch (e) { return true; }
+  }
+  function mirrorNoteHTML() {
+    if (onOfficialHost() || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return '';
+    return '<div class="mirror-note">这是 FinModel Lab 的副本。正式地址：' +
+      '<a href="' + esc(CFG.SITE_URL) + '" target="_blank" rel="noopener">' + esc(CFG.SITE_URL) + '</a>' +
+      '<span>——能导出 Excel、进度可备份、地址长期不变</span></div>';
+  }
+
   /* 说明性文字只支持一种标记：**粗体**。先转义再换标签，所以数据里写不进 HTML。
      intro / steps / takeaways / dataNote / objectives 都走它，别再各自 esc()。 */
   const rich = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
@@ -499,7 +512,8 @@
     const byLevel = [1, 2, 3].map((l) => DB.models.filter((m) => m.level === l).length);
     const feat = DB.models.filter((m) => ['aapl-income', 'vc-captable', 'tcent-seg', 'msft-atvi', 'byd-3s', 'belle-lbo-full'].indexOf(m.id) >= 0);
 
-    return '<div class="page-head">' +
+    return mirrorNoteHTML() +
+      '<div class="page-head">' +
         '<div class="eyebrow">FINMODEL LAB</div>' +
         '<h1>财务模型实训平台</h1>' +
         '<div class="sub">用真实财报数据搭模型。每一个空格都要你自己写公式——可以引用其他单元格、跨表引用、做加减乘除。' +
@@ -1157,6 +1171,12 @@
       '而不是整理好的摘要。中间有一张「勾稽桥」，带你验证三表之间必须对上的线' +
       '（净利润、资产=负债+权益、现金变动），并解释那些注定对不上的差额是什么。' +
       '走完这一步，才轮到搭预测模型。在<a href="#/courses">训练课程</a>里可以按模型类型找到它们。</p>' +
+      (CFG.SITE_URL || CFG.REPO_URL ? '<h3>地址与反馈</h3><ul>' +
+        (CFG.SITE_URL ? '<li><b>正式地址</b>：<a href="' + esc(CFG.SITE_URL) + '">' + esc(CFG.SITE_URL) + '</a>。分享给别人用这个，能导出 Excel、地址长期不变。</li>' : '') +
+        (CFG.REPO_URL ? '<li><b>源码</b>：<a href="' + esc(CFG.REPO_URL) + '" target="_blank" rel="noopener">' + esc(CFG.REPO_URL) + '</a>，代码 MIT、教学内容 CC BY-NC 4.0。</li>' +
+          '<li><b>发现错误或有建议</b>：去 <a href="' + esc(CFG.REPO_URL.replace(/\/$/, '')) + '/issues" target="_blank" rel="noopener">GitHub Issues</a> 提。' +
+          '数据抄错、公式判错、文字过时都算，写清楚是哪个模型的哪一格就行。会改的也欢迎直接改了提 Pull Request。</li>' : '') +
+        '</ul>' : '') +
       '<h3 style="color:var(--err)">重要声明</h3>' +
       '<p class="footnote">本平台所有历史财务数据均整理自公司公开披露的年度报告、Form 10-K 及交易公告，来源已在每个模型的"数据说明"中标注。' +
       '凡预测、假设、未公开披露的交易参数，均在表内明确标注为"教学假设"。' +

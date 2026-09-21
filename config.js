@@ -14,5 +14,11 @@
  * ==========================================================================*/
 window.FML_CONFIG = {
   SUPABASE_URL: '',
-  SUPABASE_ANON_KEY: ''
+  SUPABASE_ANON_KEY: '',
+
+  /* 正式地址和源码仓库。
+     使用说明页会显示这两个链接；在别处打开（claude.ai 制品、单文件版、别人镜像）时，
+     首页顶部会提示正式地址。清空就都不显示。 */
+  SITE_URL: 'https://waldeinsamkeit-w.github.io/finmodel-lab/',
+  REPO_URL: 'https://github.com/Waldeinsamkeit-W/finmodel-lab'
 };
