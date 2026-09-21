@@ -1775,7 +1775,10 @@
 
       const meta = [];
       if (tries) meta.push('已提交 ' + tries + ' 次');
-      if (savedTier) meta.push('用过 ' + savedTier + ' 级提示');
+      /* 记录发生在渲染之后（showHint 先渲染、确认显示了才记账），
+         所以这里要把正在展示的层级也算上，否则刚点完第 3 级还显示「用过 2 级」 */
+      const shownTier = Math.max(savedTier, usedTier);
+      if (shownTier) meta.push('用过 ' + shownTier + ' 级提示');
       if (wasRevealed) meta.push('看过答案');
 
       hintHTML = '<div class="side-sec"><div class="st">当前单元格</div><div class="hint-box">' +

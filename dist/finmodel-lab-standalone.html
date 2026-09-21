@@ -140,6 +140,9 @@
 }
 
 * { box-sizing: border-box; }
+/* 浏览器默认把 [hidden] 设成 display:none，但任何带 display 的类（.btn 的 inline-flex）
+   都会把它压掉——「下一个错误」按钮就是这么在没检查之前露出来的。全局兜底一次。 */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -18081,7 +18084,10 @@ window.FML_CONFIG = {
 
       const meta = [];
       if (tries) meta.push('已提交 ' + tries + ' 次');
-      if (savedTier) meta.push('用过 ' + savedTier + ' 级提示');
+      /* 记录发生在渲染之后（showHint 先渲染、确认显示了才记账），
+         所以这里要把正在展示的层级也算上，否则刚点完第 3 级还显示「用过 2 级」 */
+      const shownTier = Math.max(savedTier, usedTier);
+      if (shownTier) meta.push('用过 ' + shownTier + ' 级提示');
       if (wasRevealed) meta.push('看过答案');
 
       hintHTML = '<div class="side-sec"><div class="st">当前单元格</div><div class="hint-box">' +

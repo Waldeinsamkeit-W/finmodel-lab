@@ -131,6 +131,9 @@
 }
 
 * { box-sizing: border-box; }
+/* 浏览器默认把 [hidden] 设成 display:none，但任何带 display 的类（.btn 的 inline-flex）
+   都会把它压掉——「下一个错误」按钮就是这么在没检查之前露出来的。全局兜底一次。 */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
