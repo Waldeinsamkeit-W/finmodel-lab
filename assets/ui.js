@@ -578,7 +578,7 @@
               '<div class="mc-top"><span class="chip mkt-secondary">二级市场</span></div>' +
               '<div class="mc-title">上市公司财务分析与估值</div>' +
               '<div class="mc-desc">利润表拆解、杜邦分析、分部预测、毛利桥、银行模型、三表联动、DCF 估值。' +
-              '数据全部来自年报与 10-K。</div>' +
+              '真实公司案例的数据出自年报、10-K 等公开披露，构造数据的教学模型在页内注明。</div>' +
               '<div class="mc-foot"><span>' + DB.models.filter((m) => m.market === 'secondary').length + ' 个模型</span></div>' +
             '</div>' +
             '<div class="model-card" data-market="primary" data-goto="#/browse/primary">' +
@@ -877,9 +877,11 @@
 
     const title = scope === 'secondary' ? '二级市场模型' : scope === 'primary' ? '一级市场模型' : '全部模型';
     const desc = scope === 'secondary'
-      ? '上市公司财报分析与估值。所有历史数据均来自公司年报 / Form 10-K，预测假设已在表内明确标注。'
+      ? '上市公司财报分析与估值。真实公司案例的历史数据出自年报、Form 10-K 等公开披露，出处和核对情况见各模型「数据说明」；' +
+        '预测假设已在表内标注，构造数据的教学模型在页内注明。'
       : scope === 'primary'
-        ? '私募股权与并购交易建模。交易条款来自公开公告，未披露的融资细节以教学假设呈现并标注。'
+        ? '私募股权与并购交易建模。真实交易的条款来自公开公告，未披露的融资细节以教学假设呈现并标注；' +
+          '不涉及真实交易的教学模型在页内注明。'
         : '按市场、难度、行业筛选。点开任意模型即可开始，进度自动保存。';
 
     const seg = (id, cur, opts) => '<div class="seg" data-seg="' + id + '">' +
@@ -1178,8 +1180,10 @@
           '数据抄错、公式判错、文字过时都算，写清楚是哪个模型的哪一格就行。会改的也欢迎直接改了提 Pull Request。</li>' : '') +
         '</ul>' : '') +
       '<h3 style="color:var(--err)">重要声明</h3>' +
-      '<p class="footnote">本平台所有历史财务数据均整理自公司公开披露的年度报告、Form 10-K 及交易公告，来源已在每个模型的"数据说明"中标注。' +
-      '凡预测、假设、未公开披露的交易参数，均在表内明确标注为"教学假设"。' +
+      '<p class="footnote">真实公司案例的历史财务数据整理自公司公开披露的年度报告、Form 10-K 及交易公告；' +
+      '少数模型经二手渠道整理（新浪财经、同花顺 F10、新闻报道）。出处和核对情况见每个模型的「数据说明」。' +
+      '另有一部分模型是教学构造的算例，不对应任何真实公司或交易，页内已注明。' +
+      '预测、假设和未公开披露的交易参数，在表内标为教学假设或预测假设（鼠标停在只读格上可以看到）。' +
       '本平台内容仅用于财务建模的技能训练，不构成任何投资建议、估值结论或对相关公司与交易的评价。' +
       '实际使用时请以公司披露的原始文件为准。</p>' +
       '</div>';
@@ -1194,6 +1198,8 @@
     S.model = m;
     S.startTs = Date.now();
     const rec = Store.model(m.id);
+    /* 模型改过表格结构（例如 2026-09 数据核验后插了行）：旧作答可能对不上新行，先存还原点再提示 */
+    const revChanged = Store.checkRev(m.id, m.rev);
     S.inputs = Object.assign({}, rec.inputs);
     S.sheetIdx = Math.min(rec.lastSheet || 0, m.sheets.length - 1);
     S.showChecks = false;
@@ -1255,6 +1261,10 @@
     document.getElementById('btnBack').onclick = function () {
       if (history.length > 1) history.back(); else location.hash = '#/browse/all';
     };
+    if (revChanged) {
+      toast('这个模型在 ' + m.rev + ' 调整过表格结构，之前填的部分格子可能对不上新的行。' +
+        '改版前的作答已存为还原点（「···」›「恢复上次存档」）。', '', 9000);
+    }
     document.getElementById('btnCheck').onclick = function () { checkAll(); };
     document.getElementById('btnNext').onclick = function () { jumpToIssue(); };
     document.getElementById('btnReset').onclick = function () {
@@ -1893,20 +1903,24 @@
         const bits = [d.title, d.period, d.statement, d.page ? '第 ' + d.page + ' 页' : null]
           .filter(Boolean).map(esc).join(' · ');
         /* 「已核对」和「照抄自数据说明」必须分开标。
-           一条没人核过的来源，看起来和核过的一模一样，那这套溯源就是装饰。 */
+           一条没人核过的来源，看起来和核过的一模一样，那这套溯源就是装饰。
+           核对标记后面写清楚核了哪些数（covers）——核了一部分不等于整份都核了。 */
         const mark = d.verified
-          ? '<span class="prov-ok" title="已对着原文核对">✓ 已核对</span>'
+          ? '<span class="prov-ok" title="已对着原文核对">✓ ' + esc(Prov.verifiedBy(d)) + '</span>'
           : '<span class="prov-un" title="来源已标注，但尚未对着原文逐项核对">待核对</span>';
+        const covers = d.covers ? '<div class="prov-covers">核对范围：' + esc(d.covers) + '</div>' : '';
         return d.url
-          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a> ' + mark + '</div>'
-          : '<div>' + bits + ' ' + mark + '</div>';
+          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a> ' + mark + covers + '</div>'
+          : '<div>' + bits + ' ' + mark + covers + '</div>';
       }).join('') + '</div>';
+      if (src.unverified) html += '<div class="prov-gap">尚未对照原文核对：' + esc(src.unverified) + '</div>';
     }
     /* 缺口只在「已经声明了 source 但填了一半」时提示。
-       一个 source 都没声明的模型不在这里唠叨——56 个模型页页挂一行警告是噪声，
+       一个 source 都没声明的模型不在这里唠叨——几十个模型页页挂一行警告是噪声，
        那份清单属于开发期的 verifySource()，是拿来干活的，不是拿来给学生看的。 */
     if (m.source) {
-      const gaps = Prov.gaps(m);
+      /* 「尚未核对的部分」上面已经单独列了，这里只报其余缺口 */
+      const gaps = Prov.gaps(m).filter(function (g) { return g.indexOf('尚未核对的部分') !== 0; });
       if (gaps.length) html += '<div class="prov-gap">溯源信息未标注：' + esc(gaps.join('、')) + '</div>';
     }
     return html;

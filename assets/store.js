@@ -87,6 +87,20 @@
     /** 只读查询，不会创建空记录（列表页渲染用这个） */
     peek: function (id) { return load().models[id] || null; },
 
+    /** 模型的表格结构改过（model.rev 变了）时调用。
+        有作答就先存一个还原点，返回 true 让界面提示；作答原样保留，不自动搬格子——
+        对不上新行的格子会在检查时标红，还原点里有改版前的完整记录，什么都不会丢。 */
+    checkRev: function (modelId, rev) {
+      if (!rev) return false;
+      const r = modelRec(modelId);
+      if (r.rev === rev) return false;
+      const had = Object.keys(r.inputs).length > 0;
+      if (had) Store.snapshot(modelId, '表格结构更新（' + rev + '）前的作答');
+      r.rev = rev;
+      scheduleSave();
+      return had;
+    },
+
     /** 是否真正作答过 */
     hasWork: function (id) {
       const r = load().models[id];
@@ -267,7 +281,8 @@
           attempts: isObj(r.attempts) ? r.attempts : {},
           firstOk: isObj(r.firstOk) ? r.firstOk : {},
           snapshots: Array.isArray(r.snapshots) ? r.snapshots.filter(isObj) : [],
-          seconds: typeof r.seconds === 'number' ? r.seconds : 0
+          seconds: typeof r.seconds === 'number' ? r.seconds : 0,
+          rev: typeof r.rev === 'string' ? r.rev : null
         };
         /* inputs 的值只收字符串；别的类型丢掉而不是带进来炸公式引擎 */
         const ks = Object.keys(r.inputs || {});

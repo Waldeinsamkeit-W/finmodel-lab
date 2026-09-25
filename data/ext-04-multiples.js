@@ -18,6 +18,7 @@
 
   add({
     id: 'comps-choose', market: 'secondary', level: 2, type: 'comps',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '倍数怎么选：P/E、P/S、P/B、PEG 各自什么时候失效',
     subtitle: '四家公司、四个倍数，全都算一遍——你会看到大部分格子算出来的数是没有意义的',

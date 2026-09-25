@@ -17,6 +17,7 @@
    * ========================================================================*/
   add({
     id: 'rnpv-basic', market: 'secondary', level: 1, type: 'biotech',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: 'rNPV 入门：只多乘一个数，结论就反了',
     subtitle: '现金流和折现率都给你，只练一件事——把成功概率乘进去',
