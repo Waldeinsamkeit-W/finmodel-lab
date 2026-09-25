@@ -178,17 +178,20 @@
     });
   }
 
-  /* 给定格以前一律标「真实数据」，但 27 个模型整体是构造数据，真实模型里的预测列
-     和折现率之类也是教学假设。标签按三层判断：整个模型是否构造 → 这一行的 note
-     是否说了假设 → 这一列是不是预测年（表头带 E）。剩下的才叫历史数据。 */
-  const RE_ASSUME_NOTE = /假设|示例|教学输入|约数|可改/;
-  const RE_FORECAST_HDR = /\d{4}\s*E\b|E$|预测|情景/;
+  /* 给定格以前一律标「真实数据」，但 25 个模型整体是构造数据，真实模型里的预测列、
+     折现率之类是教学假设，还有一些是倒挤或取整出来的值。分类统一由 Prov.fieldKind
+     按「模型声明 → 格 / 行 note → 表头是否预测年 → 所在分节」判断，这里只负责措辞。
+     单格 note 会跟在行 note 后面显示：同一行里个别年份没核过原文时，只标那一格。 */
   function givenTitle(sh, r, c) {
-    const note = r.note ? '\n' + r.note : '';
-    const syn = window.Prov && Prov.isSynthetic && Prov.isSynthetic(ctx.model);
-    if (syn) return '教学假设（只读）：本模型数据为构造，不对应真实公司' + note;
-    if (r.note && RE_ASSUME_NOTE.test(r.note)) return '教学假设（只读）' + note;
-    if (RE_FORECAST_HDR.test(String(sh.header[c] || ''))) return '预测假设（只读）：教学设定，不是公司披露' + note;
+    const cd = (r.cells || [])[c - 1] || {};
+    const note = (r.note ? '\n' + r.note : '') + (cd.note ? '\n' + cd.note : '');
+    if (!window.Prov || !Prov.fieldKind) return '只读' + note;
+    if (Prov.isSynthetic(ctx.model)) return '教学假设（只读）：本模型数据为构造，不对应真实公司' + note;
+    const k = Prov.fieldKind(ctx.model, sh, sh.rows.indexOf(r), c);
+    if (k.kind === 'assumption') return '教学假设（只读）' + note;
+    if (k.kind === 'forecast') return '预测假设（只读）：教学设定，不是公司披露' + note;
+    if (k.kind === 'derived') return '换算或近似值（只读）：由披露数据计算、倒挤或取整得到，口径见数据说明' + note;
+    if (k.unverified) return '历史数据（只读，尚未对着原文核对）：出处见「案例资料 › 数据说明」' + note;
     return '历史数据（只读）：来自公司披露，出处见「案例资料 › 数据说明」' + note;
   }
 

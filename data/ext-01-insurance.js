@@ -19,6 +19,7 @@
    * ========================================================================*/
   add({
     id: 'ins-cor', market: 'secondary', level: 1, type: 'insurance',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '财险：综合成本率与两个利润来源',
     subtitle: '保险公司的"毛利率"叫综合成本率，而且它越低越好、超过 100% 就是卖一单亏一单',
@@ -105,6 +106,7 @@
    * ========================================================================*/
   add({
     id: 'ins-ev-nbv', market: 'secondary', level: 2, type: 'insurance',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '寿险：内含价值 EV 与新业务价值 NBV',
     subtitle: '寿险不能用市盈率估值——一张保单卖出去，利润要在未来二十年里慢慢释放',
@@ -217,6 +219,7 @@
    * ========================================================================*/
   add({
     id: 'ins-ev-movement', market: 'secondary', level: 3, type: 'insurance',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '寿险：内含价值变动分析与 P/EV 估值',
     subtitle: '期初 EV 到期末 EV 之间有六项，只有两项是可重复的——这决定了 EV 增长该不该被相信',

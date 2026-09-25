@@ -1194,6 +1194,8 @@
     S.model = m;
     S.startTs = Date.now();
     const rec = Store.model(m.id);
+    /* 模型改过表格结构（例如 2026-09 数据核验后插了行）：旧作答可能对不上新行，先存还原点再提示 */
+    const revChanged = Store.checkRev(m.id, m.rev);
     S.inputs = Object.assign({}, rec.inputs);
     S.sheetIdx = Math.min(rec.lastSheet || 0, m.sheets.length - 1);
     S.showChecks = false;
@@ -1255,6 +1257,10 @@
     document.getElementById('btnBack').onclick = function () {
       if (history.length > 1) history.back(); else location.hash = '#/browse/all';
     };
+    if (revChanged) {
+      toast('这个模型在 ' + m.rev + ' 调整过表格结构，之前填的部分格子可能对不上新的行。' +
+        '改版前的作答已存为还原点（「···」›「恢复上次存档」）。', '', 9000);
+    }
     document.getElementById('btnCheck').onclick = function () { checkAll(); };
     document.getElementById('btnNext').onclick = function () { jumpToIssue(); };
     document.getElementById('btnReset').onclick = function () {
@@ -1893,20 +1899,24 @@
         const bits = [d.title, d.period, d.statement, d.page ? '第 ' + d.page + ' 页' : null]
           .filter(Boolean).map(esc).join(' · ');
         /* 「已核对」和「照抄自数据说明」必须分开标。
-           一条没人核过的来源，看起来和核过的一模一样，那这套溯源就是装饰。 */
+           一条没人核过的来源，看起来和核过的一模一样，那这套溯源就是装饰。
+           核对标记后面写清楚核了哪些数（covers）——核了一部分不等于整份都核了。 */
         const mark = d.verified
-          ? '<span class="prov-ok" title="已对着原文核对">✓ 已核对</span>'
+          ? '<span class="prov-ok" title="已对着原文核对">✓ ' + esc(Prov.verifiedBy(d)) + '</span>'
           : '<span class="prov-un" title="来源已标注，但尚未对着原文逐项核对">待核对</span>';
+        const covers = d.covers ? '<div class="prov-covers">核对范围：' + esc(d.covers) + '</div>' : '';
         return d.url
-          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a> ' + mark + '</div>'
-          : '<div>' + bits + ' ' + mark + '</div>';
+          ? '<div><a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + bits + ' ↗</a> ' + mark + covers + '</div>'
+          : '<div>' + bits + ' ' + mark + covers + '</div>';
       }).join('') + '</div>';
+      if (src.unverified) html += '<div class="prov-gap">尚未对照原文核对：' + esc(src.unverified) + '</div>';
     }
     /* 缺口只在「已经声明了 source 但填了一半」时提示。
-       一个 source 都没声明的模型不在这里唠叨——56 个模型页页挂一行警告是噪声，
+       一个 source 都没声明的模型不在这里唠叨——几十个模型页页挂一行警告是噪声，
        那份清单属于开发期的 verifySource()，是拿来干活的，不是拿来给学生看的。 */
     if (m.source) {
-      const gaps = Prov.gaps(m);
+      /* 「尚未核对的部分」上面已经单独列了，这里只报其余缺口 */
+      const gaps = Prov.gaps(m).filter(function (g) { return g.indexOf('尚未核对的部分') !== 0; });
       if (gaps.length) html += '<div class="prov-gap">溯源信息未标注：' + esc(gaps.join('、')) + '</div>';
     }
     return html;

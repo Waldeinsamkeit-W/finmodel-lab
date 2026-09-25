@@ -19,6 +19,7 @@
    * ========================================================================*/
   add({
     id: 'cr-leverage', market: 'secondary', level: 1, type: 'credit',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '债权人看什么：杠杆倍数与覆盖倍数',
     subtitle: '股东问"这家公司能涨多少"，债权人只问一件事：它会不会还不上钱',
@@ -116,6 +117,7 @@
    * ========================================================================*/
   add({
     id: 'cr-covenant', market: 'secondary', level: 2, type: 'credit',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '债务契约：headroom 还剩多少，以及 EBITDA 加回的操纵空间',
     subtitle: '契约不是"违约了才有用"，它的价值在于提前把控制权交到债权人手里',
@@ -253,6 +255,7 @@
    * ========================================================================*/
   add({
     id: 'cr-recovery', market: 'secondary', level: 3, type: 'credit',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '违约回收：同一家公司，你持有哪一层决定了一切',
     subtitle: '公司只有一个企业价值，但债务有好几层——清偿顺序决定了谁全额拿回、谁血本无归',

@@ -19,6 +19,7 @@
    * ========================================================================*/
   add({
     id: 're-noi-cap', market: 'primary', level: 1, type: 'realestate',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '写字楼：NOI 与资本化率估值',
     subtitle: '不动产估值只有一个公式：价值 = NOI ÷ Cap Rate。难的是 NOI 怎么算、Cap Rate 凭什么取',
@@ -116,6 +117,7 @@
    * ========================================================================*/
   add({
     id: 're-dscr', market: 'primary', level: 2, type: 'realestate',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '经营性物业贷：DSCR、LTV 与压力测试',
     subtitle: '贷款人不关心这栋楼能涨到多少，只关心它每年的现金流够不够还本付息',
@@ -250,6 +252,7 @@
    * ========================================================================*/
   add({
     id: 're-dev-irr', market: 'primary', level: 3, type: 'realestate',
+    dataKind: 'synthetic',   // 纯教学构造：没有原文可指，不需要溯源（见 provenance.js）
     companyId: null, industryId: null,
     title: '开发项目：分期现金流与股权 IRR',
     subtitle: '土地款一次性砸下去，销售款分四年慢慢回——中间的时间差决定了这个项目赚不赚钱',
